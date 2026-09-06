@@ -1,99 +1,60 @@
-# ================================
-# Project basic configuration
-# ================================
+# ================================================================
+#  base-setup.cmake — единственная точка конфигурации проекта
+#  Всё, что нужно задать, задаётся одним вызовом stm32_project().
+#  Имя проекта: берётся из cache-переменной prj_name (может задать
+#  CMakePreset), иначе из имени папки.
+# ================================================================
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/Platform.cmake)
 
-# Имя проекта (если не задано Preset'ом)
-if(NOT DEFINED prj_name)
-	get_filename_component(prj_name "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
-endif()
+stm32_project(
+	VERSION     3.1
+	DESCRIPTION "Base for STM32 cmake"
 
-set(PROJECT_NAME ${prj_name})
-set(VER 3.0)
-set(DESC "Base for STM32 cmake")
+	# ================================
+	# MCU chip selection
+	# ================================
+	# DEVICE = полноценный код чипа
+	# Пример: STM32F446RE, STM32F103C8, STM32G431KB
+	DEVICE STM32F446RE
 
-# ================================
-# MCU chip selection
-# ================================
-# DEVICE = полноценный код чипа
-# Пример: STM32F446RE, STM32F103C8, STM32G431KB
-set(DEVICE "STM32F446re")
+	# ================================
+	# Memory layout (heap / stack)
+	# ================================
+	HEAP_SIZE  0x200   # _Min_Heap_Size
+	STACK_SIZE 0x400   # _Min_Stack_Size
 
-# ================================
-# Drivers ON/OFF
-# ================================
-set(USE_DRIVERS ON)
+	# ================================
+	# Drivers
+	# ================================
+	# DRIVERS — какие модули STM32_Drivers_CPP компилировать (system/rcc/gpio/
+	# flash/irq_registry подключаются всегда, если драйверы вообще нужны).
+	# Непустой список сам включает драйверы — отдельного USE_DRIVERS ON не
+	# требуется. USE_DRIVERS нужен явно только чтобы взять одно ядро без
+	# опциональных модулей (USE_DRIVERS ON + пустой DRIVERS) или принудительно
+	# отключить всё (USE_DRIVERS OFF).
+	DRIVERS
+		UART SPI DMA TIM
 
-# ================================
-# Core MCU flags, CPU, instruction set and FPU setup
-# ================================
-set(cpu_PARAMS
-	# Other parameters
+	# ================================
+	# Sources — только код приложения. startup/vector/linker и newlib-glue
+	# (no_system_files/*) подключаются автоматически в CMakeLists.txt.
+	# ================================
+	SOURCES
+		src/main.cpp
+
+	# ================================
+	# Include directories
+	# ================================
+	INCLUDE_DIRS
+		inc
 )
 
 # ================================
-# Compiler options 
-# ================================
-set(compiler_OPTS	# => target_compile_options
-
-)
-
-# ================================
-# Linker options
-# ================================
-set(linker_OPTS 	# => target_link_options
-)
-
-# ================================
-# Memory layout (heap / stack)
-# ================================
-set(HEAP_SIZE  0x200)   # _Min_Heap_Size
-set(STACK_SIZE 0x400)   # _Min_Stack_Size
-
-# ================================
-# Sources
-# ================================
-set(sources_SRCS
-	${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-
-	${CMAKE_CURRENT_SOURCE_DIR}/no_system_files/sysmem.c
-	${CMAKE_CURRENT_SOURCE_DIR}/no_system_files/syscalls.c
-
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/system.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/gpio.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/flash.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/rcc.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/uart.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/interface.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/dma.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src/tim.cpp
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/math/sint.c
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/FastMathFunctions/arm_sin_f32.c
-)
-
-# ================================
-# Include directories
-# ================================
-set(include_DIRS
-	${CMAKE_CURRENT_SOURCE_DIR}/inc
-
-	# ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/math
-)
-
-if(USE_DRIVERS)
-	list(APPEND include_DIRS
-		${CMAKE_CURRENT_SOURCE_DIR}/Drivers/src
-	)
-endif()
-
-# ================================
-# Extra user defines (если нужны)
+# Extra user defines / options / libs (пока без отдельных именованных
+# аргументов в stm32_project — расширим при первой реальной надобности)
 # ================================
 set(symbols_c_SYMB "")
 set(symbols_cxx_SYMB "")
 set(symbols_asm_SYMB "")
-
-# ================================
-# Extra user options / libs
-# ================================
 set(link_DIRS "")
 set(link_LIBS "")

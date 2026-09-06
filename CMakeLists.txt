@@ -2,8 +2,16 @@ cmake_minimum_required(VERSION 3.22)
 ################################## BASE SETUP ###############################################################
 include("${CMAKE_CURRENT_SOURCE_DIR}/base-setup.cmake")
 
-# Toolchain
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/gcc-arm-none-eabi.cmake")
+# Toolchain — registered as CMAKE_TOOLCHAIN_FILE (the official mechanism, not
+# a bare include()) so it's cached, feeds try_compile()/ExternalProject_Add(),
+# and shows up in IDE tooling. The `if(NOT ...)` guard means an explicit
+# -DCMAKE_TOOLCHAIN_FILE=... or preset override still wins; otherwise this is
+# what makes the project build with the right compiler even with no preset
+# at all.
+if(NOT CMAKE_TOOLCHAIN_FILE)
+	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/gcc-arm-none-eabi.cmake"
+		CACHE FILEPATH "STM32 arm-none-eabi toolchain" FORCE)
+endif()
 
 ################################## PROJECT SETUP ###############################################################
 project(${PROJECT_NAME}
@@ -36,10 +44,14 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/cmsis-download.cmake")
 set(linker_script_SRC
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${STM32_DEVICE_LC}.ld
 )
-# Add sources to executable
-list(APPEND sources_SRCS 
+# Mandatory glue - same category as the linker script / startup / vectors,
+# not user code: startup + vector table, and the newlib retarget stubs
+# (sysmem.c = _sbrk/heap, syscalls.c = _write/_read/... ). Always compiled in.
+list(APPEND sources_SRCS
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/startup_common.c
+	${CMAKE_SOURCE_DIR}/no_system_files/sysmem.c
+	${CMAKE_SOURCE_DIR}/no_system_files/syscalls.c
 )
 
 # Include CMSIS / Device paths
@@ -65,6 +77,11 @@ target_compile_definitions( ${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 ################################## COMPILER OPTIONS ################################################################ Compiler options
+# Optimisation level for Debug builds. -Og is the default (debug-friendly but
+# still optimised); the "debug-o0" preset drops it to -O0 for fully
+# step-through debugging (every var live, no inlining/reordering).
+set(STM32_DEBUG_OPT "-Og" CACHE STRING "Optimisation flag for Debug builds (-Og / -O0 / ...)")
+
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
 	-mthumb
 	${main_cpu_PARAMS}
@@ -79,9 +96,36 @@ target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
 	# -Wuseless-cast
 	# -Wsuggest-override
 	# $<$<COMPILE_LANGUAGE:ASM>:-x assembler-with-cpp -MMD -MP>
-	$<$<CONFIG:Debug>:-Og -g3 -ggdb>
+	$<$<CONFIG:Debug>:${STM32_DEBUG_OPT} -g3 -ggdb>
 	$<$<CONFIG:Release>:-Os -g0>
 )
+
+################################## DRIVERS ###############################################################
+# stm32_drivers (STM32_Drivers_CPP) lives inside the project at Drivers/.
+# First configure clones it there; after that it's just add_subdirectory()'d
+# as-is every configure (FetchContent must NOT re-sync it - vendored files
+# are edited/committed in place). It reads STM32_DRIVERS_REQUESTED from
+# stm32_project(DRIVERS ...). See ARCHITECTURE.md §04.5.
+if(USE_DRIVERS)
+	if(NOT EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
+		message(STATUS "Drivers: cloning into Drivers/ ...")
+		include(FetchContent)
+		FetchContent_Declare(
+			Drivers
+			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Drivers
+			GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
+			GIT_TAG        refactor-for-bootloader
+		)
+		FetchContent_MakeAvailable(Drivers)
+	else()
+		message(STATUS "Drivers: Drivers/ (in-tree)")
+		add_subdirectory(
+			"${CMAKE_SOURCE_DIR}/Drivers"
+			"${CMAKE_BINARY_DIR}/_deps/drivers-build"
+		)
+	endif()
+	target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE stm32_drivers)
+endif()
 
 ################################## LINK OPTIONS ###############################################################
 target_link_libraries(${CMAKE_PROJECT_NAME} ${link_LIBS})

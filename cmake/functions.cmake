@@ -1,10 +1,55 @@
-function(download_one FILE_NAME BASE_DIR URL_DIR )
+# ============================================================================
+# functions.cmake — helpers used by cmsis-download.cmake
+# ============================================================================
+#
+# Two groups of functions, split by comment banners below:
+#
+#   1. FETCH / CACHE PRIMITIVES  — pull per-device files from STM32-base_files
+#      (download_one) and recover cleanly from a chip switch
+#      (stm32_clean_build_dir).
+#
+#   2. GENERATORS  — turn those raw downloaded files into ready-to-use C++
+#      headers via configure_file(... @ONLY): flash_config.h (sector map) and
+#      irq_registry_config.h (IRQ dispatch stubs).
+#
+# cmsis-download.cmake is the file that actually orders the downloads and calls
+# the generators in the right sequence — see it for the per-device flow, and
+# ARCHITECTURE.md §04.4 for why the generated output is meant to be committed
+# (vendored) rather than gitignored.
+# ============================================================================
+
+
+# ############################################################################
+# 1. FETCH / CACHE PRIMITIVES
+# ############################################################################
+
+# ---------------------------------------------------------------------------
+# download_one(FILE_NAME BASE_DIR URL_DIR)
+#
+#   FILE_NAME — destination file name only, no path (e.g. "stm32f446xx.h")
+#   BASE_DIR  — destination directory, created if missing
+#   URL_DIR   — the file's path inside the STM32-base_files repo, e.g.
+#               "Device/STM32F4xx/Include/stm32f446xx.h"
+#
+# Fetches BASE_DIR/FILE_NAME from STM32-base_files if it isn't already there.
+#
+# "Already there and non-empty" always wins and is never re-downloaded — this
+# is deliberate, not just an optimisation. On the final/consuming project the
+# whole download destination is meant to be committed to git (vendored, not
+# gitignored — see ARCHITECTURE.md §04.4), so "already there" normally means
+# "vendored by an earlier configure", not "stale leftover". The one thing
+# that should force a re-fetch — switching DEVICE — is handled by the caller
+# deleting the whole download destination up front (see the device-change
+# check in cmsis-download.cmake), not by this function guessing staleness on
+# a per-file basis.
+# ---------------------------------------------------------------------------
+function(download_one FILE_NAME BASE_DIR URL_DIR)
 	set(DEST "${BASE_DIR}/${FILE_NAME}")
 	set(URL  "https://raw.githubusercontent.com/varvar6666/STM32-base_files/refs/heads/master/${URL_DIR}")
 
 	message(STATUS "Downloading file: ${FILE_NAME}")
 
-	# если уже есть и не пустой — выходим
+	# Skip re-downloading a file that's already vendored.
 	if(EXISTS "${DEST}")
 		file(SIZE "${DEST}" SZ)
 		if(SZ GREATER 0)
@@ -30,6 +75,9 @@ function(download_one FILE_NAME BASE_DIR URL_DIR )
 		message(FATAL_ERROR "Download failed: ${URL}\n${MSG}")
 	endif()
 
+	# A 0-byte file usually means a 404 that file(DOWNLOAD) didn't treat as a
+	# hard failure (e.g. a redirect to an HTML error page) — catch it here
+	# rather than silently vendoring an empty header.
 	file(SIZE "${DEST}" SZ)
 	if(SZ EQUAL 0)
 		file(REMOVE "${DEST}")
@@ -39,11 +87,19 @@ function(download_one FILE_NAME BASE_DIR URL_DIR )
 	message(STATUS "Download complete! File: ${DEST}")
 endfunction()
 
-function(k_to_int K_STR OUT)
-	string(REPLACE "K" "" _K "${K_STR}")
-	set(${OUT} ${_K} PARENT_SCOPE)
-endfunction()
-
+# ---------------------------------------------------------------------------
+# stm32_clean_build_dir()
+#
+# Wipes everything in the current build directory except CMakeCache.txt and
+# CMakeFiles/. Called when DEVICE changes mid-project (see
+# cmsis-download.cmake), so the next build can't mix object files compiled
+# for the old chip with headers/linker scripts generated for the new one.
+#
+# CMakeCache.txt and CMakeFiles/ are kept, not because something later reuses
+# them, but because this function runs *during* the very configure pass that
+# owns them — deleting them out from under a configure that's still in
+# progress would break this run, not just leave stale files behind.
+# ---------------------------------------------------------------------------
 function(stm32_clean_build_dir)
 	message(STATUS "Cleaning build directory (except CMakeCache.txt)")
 
@@ -61,7 +117,41 @@ function(stm32_clean_build_dir)
 	endforeach()
 endfunction()
 
-# Uniform-page families (no variable-size sectors): PAGE_SIZE in bytes
+
+# ############################################################################
+# 2. GENERATORS
+# ############################################################################
+#
+#   stm32_generate_flash_config()  ->  Device/Include/flash_config.h
+#       flash_sectors[] : one {address, size} entry per erase sector/page of
+#       the selected chip's flash. This is what a flash driver (or the
+#       bootloader) erases and writes by — it must never be guessed by hand.
+#
+#   stm32_generate_irq_handlers()  ->  Device/Include/irq_registry_config.h
+#       one `extern "C" void XXX_IRQHandler()` stub per peripheral vector in
+#       the downloaded vector_<device>.c, each forwarding to
+#       IRQ_Registry::Dispatch(XXX_IRQn) — see STM32_Drivers_CPP's
+#       IRQ_Registry.md for the runtime side that consumes this.
+#
+# Both run configure_file(... @ONLY) against a downloaded .h.in template.
+
+# ---------------------------------------------------------------------------
+# k_to_int(K_STR OUT)
+#
+# "128K" -> 128 (strips the trailing "K" used throughout the *-map.cmake
+# flash/RAM tables, so the result can be fed to math()).
+# ---------------------------------------------------------------------------
+function(k_to_int K_STR OUT)
+	string(REPLACE "K" "" _K "${K_STR}")
+	set(${OUT} ${_K} PARENT_SCOPE)
+endfunction()
+
+# Uniform-page families: every flash page is the same size (in bytes), so a
+# device's sector list can be derived purely from PAGE_SIZE + total flash
+# size — no per-density table needed. Families *not* listed here are assumed
+# to have a real sector map instead: see ${SERIES}_SECTOR_MAP inside the
+# downloaded cmake/STM32<family>-map.cmake (F1/F2/F4/F7/G4/H7 all define one;
+# G0/C0 don't, because they don't need to).
 set(STM32G0_PAGE_SIZE 2048)
 set(STM32C0_PAGE_SIZE 2048)
 
@@ -84,7 +174,7 @@ set(STM32C0_PAGE_SIZE 2048)
 # ---------------------------------------------------------------------------
 function(stm32_generate_flash_config SERIES FLASH_STR DEVICE_NAME TEMPLATE OUT_FILE)
 
-	# Strip the trailing "K" from flash size strings like "128K" → "128"
+	# Strip the trailing "K" from flash size strings like "128K" -> "128"
 	k_to_int("${FLASH_STR}" _kb)
 
 	# Resolve the two possible data sources for this family.
@@ -168,10 +258,17 @@ endfunction()
 # ---------------------------------------------------------------------------
 # stm32_generate_irq_handlers(VECTOR_FILE TEMPLATE OUT_FILE)
 #
-# Parses the vector file and generates one header with:
-#   - IRQ_TABLE_SIZE  (total peripheral slots, including reserved)
-#   - _irq_table[]   (dispatch table)
-#   - extern "C" stubs, each calling IRQ_Registry::Dispatch(XXX_IRQn)
+# Parses the downloaded vector table and generates one header with:
+#   - IRQ_TABLE_SIZE  (total peripheral slots, including reserved/gap entries)
+#   - _irq_table[]    (dispatch table, built by the template itself)
+#   - one extern "C" stub per *_IRQHandler found, calling
+#     IRQ_Registry::Dispatch(XXX_IRQn)
+#
+# This only reads VECTOR_FILE — it's plain text scraping (`file(STRINGS ...
+# REGEX ...)`), not a real C parser, so it depends on the vector_<device>.c
+# files from STM32-base_files keeping their current formatting
+# (`(uint32_t) XXX_IRQHandler,` per entry, `void XXX_IRQHandler(void)` for the
+# weak declarations).
 # ---------------------------------------------------------------------------
 function(stm32_generate_irq_handlers VECTOR_FILE TEMPLATE OUT_FILE)
 

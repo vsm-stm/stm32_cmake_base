@@ -6,7 +6,6 @@
 			"hidden": true,
 			"generator": "Ninja",
 			"binaryDir": "${sourceDir}/build/${presetName}",
-			"toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
 			"cacheVariables": {
 				"CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
 			}
@@ -16,6 +15,13 @@
 			"inherits": "default",
 			"cacheVariables": {
 				"CMAKE_BUILD_TYPE": "Debug"
+			}
+		},
+		{
+			"name": "debug-o0",
+			"inherits": "debug",
+			"cacheVariables": {
+				"STM32_DEBUG_OPT": "-O0"
 			}
 		},
 		{
@@ -44,6 +50,10 @@
 		{
 			"name": "debug",
 			"configurePreset": "debug"
+		},
+		{
+			"name": "debug-o0",
+			"configurePreset": "debug-o0"
 		},
 		{
 			"name": "relWithDebInfo",
