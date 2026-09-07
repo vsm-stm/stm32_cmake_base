@@ -54,10 +54,13 @@ list(APPEND sources_SRCS
 	${CMAKE_SOURCE_DIR}/no_system_files/syscalls.c
 )
 
-# Include CMSIS / Device paths
+# Include CMSIS / Device paths + CMake-generated headers (flash_config.h,
+# irq_registry_config.h — see cmsis-core/generated/, kept apart from the
+# raw downloaded files).
 list(APPEND include_DIRS
 	${CMAKE_SOURCE_DIR}/cmsis-core/Include
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include
+	${CMAKE_SOURCE_DIR}/cmsis-core/generated
 )
 
 ################################## TARGET DEFINITIONS ###############################################################

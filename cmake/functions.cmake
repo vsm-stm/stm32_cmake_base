@@ -122,12 +122,12 @@ endfunction()
 # 2. GENERATORS
 # ############################################################################
 #
-#   stm32_generate_flash_config()  ->  Device/Include/flash_config.h
+#   stm32_generate_flash_config()  ->  cmsis-core/generated/flash_config.h
 #       flash_sectors[] : one {address, size} entry per erase sector/page of
 #       the selected chip's flash. This is what a flash driver (or the
 #       bootloader) erases and writes by — it must never be guessed by hand.
 #
-#   stm32_generate_irq_handlers()  ->  Device/Include/irq_registry_config.h
+#   stm32_generate_irq_handlers()  ->  cmsis-core/generated/irq_registry_config.h
 #       one `extern "C" void XXX_IRQHandler()` stub per peripheral vector in
 #       the downloaded vector_<device>.c, each forwarding to
 #       IRQ_Registry::Dispatch(XXX_IRQn) — see STM32_Drivers_CPP's

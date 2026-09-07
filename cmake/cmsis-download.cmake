@@ -105,6 +105,7 @@ else()
 
 		file(REMOVE_RECURSE
 		${CMAKE_SOURCE_DIR}/cmsis-core/download_files
+		${CMAKE_SOURCE_DIR}/cmsis-core/generated
 		)
 
 		# Clean build artifacts
@@ -194,7 +195,7 @@ download_one(
 stm32_generate_irq_handlers(
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/irq_registry_config.h.in"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/irq_registry_config.h"
+	"${CMAKE_SOURCE_DIR}/cmsis-core/generated/irq_registry_config.h"
 )
 # ----------------------------------------------------------------------------
 # download STM32 headers files and system files
@@ -356,7 +357,7 @@ stm32_generate_flash_config(
 	"${STM32_FLASH}"
 	"${STM32_DEVICE_UC}"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/${FLASH_TEMPLATE_NAME}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/flash_config.h"
+	"${CMAKE_SOURCE_DIR}/cmsis-core/generated/flash_config.h"
 )
 
 # Drivers (STM32_Drivers_CPP) are pulled in and linked from the main
