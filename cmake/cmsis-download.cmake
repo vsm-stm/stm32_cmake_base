@@ -107,6 +107,7 @@ else()
 		file(REMOVE_RECURSE
 		${CMAKE_SOURCE_DIR}/cmsis-core/download_files
 		${CMAKE_SOURCE_DIR}/cmsis-core/generated
+		${CMAKE_SOURCE_DIR}/cmsis-core/drivers_gen
 		)
 
 		# Clean build artifacts
