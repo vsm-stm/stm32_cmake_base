@@ -77,17 +77,6 @@ function(download_one FILE_NAME BASE_DIR URL_DIR)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# k_to_int(K_STR OUT)
-#
-# "128K" -> 128 (strips the trailing "K" used throughout the *-map.cmake
-# flash/RAM tables, so the result can be fed to math()).
-# ---------------------------------------------------------------------------
-function(k_to_int K_STR OUT)
-	string(REPLACE "K" "" _K "${K_STR}")
-	set(${OUT} ${_K} PARENT_SCOPE)
-endfunction()
-
-# ---------------------------------------------------------------------------
 # stm32_clean_build_dir()
 #
 # Wipes everything in the current build directory except CMakeCache.txt and
