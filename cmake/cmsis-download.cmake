@@ -10,11 +10,12 @@
 #      files + the build dir if so,
 #   3. fetches (or reuses already-vendored) CMSIS device headers, startup
 #      code, the vector table, and an SVD from STM32-base_files,
-#   4. picks and renders the right linker script template for this family,
-#   5. generates flash_config.h and irq_registry_config.h (see functions.cmake).
+#   4. picks and renders the right linker script template for this family.
 #
-# Pulling in STM32_Drivers_CPP is a separate concern and lives in the main
-# CMakeLists.txt now (the DRIVERS section), next to where it gets linked.
+# The two generated headers flash_config.h / irq_registry_config.h are
+# NOT produced here — they're drivers-only, so STM32_Drivers_CPP generates
+# them itself. Pulling in the drivers is a separate concern and lives in the
+# main CMakeLists.txt (the DRIVERS section).
 #
 # Every file this pulls in or generates lands under
 # cmsis-core/download_files/ and is meant to be committed once vendored —
@@ -186,17 +187,10 @@ download_one(
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup"
 	"startup_c/${STM32_SERIES_UC}/vector_${STM32_NAME}.c")
 
-download_one(
-	"irq_registry_config.h.in"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/"
-	"cmake/irq_registry_config.h.in"
-)
+# Path to the downloaded vector table - the exe compiles it (it's the real
+# .isr_vector), and STM32_Drivers_CPP scrapes it to generate its IRQ stubs.
+set(STM32_VECTOR_FILE "${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c")
 
-stm32_generate_irq_handlers(
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/irq_registry_config.h.in"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/generated/irq_registry_config.h"
-)
 # ----------------------------------------------------------------------------
 # download STM32 headers files and system files
 # ----------------------------------------------------------------------------
@@ -312,7 +306,7 @@ download_one(
 	"linker/${LD_TEMPLATE}")
 
 set(LD_IN  ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${LD_TEMPLATE})
-set(LD_OUT ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${STM32_DEVICE_LC}.ld)
+set(LD_OUT ${CMAKE_SOURCE_DIR}/cmsis-core/generated/linker/${STM32_DEVICE_LC}.ld)
 
 configure_file(
   ${LD_IN}
@@ -323,42 +317,10 @@ configure_file(
 
 message(STATUS "Linker script generated: ${LD_OUT}")
 
-# ============================================================================
-# 5. Flash sector map header (flash_config.h)
-# ============================================================================
-
-# Families with single/dual variants: F4, F7, G4, H7
-# Families with xl variant:           F1 (XL-density, >512K)
-# All others:                         one template, no suffix
-set(_dual_families STM32F4 STM32F7 STM32G4 STM32H7)
-list(FIND _dual_families "${STM32_CORE}" _dual_idx)
-
-k_to_int("${STM32_FLASH}" _flash_kb)
-
-if(_dual_idx GREATER_EQUAL 0)
-	if(STM32_DUAL_BANK)
-		set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config_dual.h.in")
-	else()
-		set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config_single.h.in")
-	endif()
-elseif(STM32_CORE STREQUAL "STM32F1" AND _flash_kb GREATER 512)
-	set(FLASH_TEMPLATE_NAME "STM32F1_flash_config_xl.h.in")
-else()
-	set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config.h.in")
-endif()
-
-download_one(
-	"${FLASH_TEMPLATE_NAME}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake"
-	"cmake/${FLASH_TEMPLATE_NAME}")
-
-stm32_generate_flash_config(
-	"${STM32_CORE}"
-	"${STM32_FLASH}"
-	"${STM32_DEVICE_UC}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/${FLASH_TEMPLATE_NAME}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/generated/flash_config.h"
-)
-
-# Drivers (STM32_Drivers_CPP) are pulled in and linked from the main
-# CMakeLists.txt (the DRIVERS section) — not here.
+# flash_config.h (sector map) and irq_registry_config.h (IRQ dispatch stubs)
+# are NOT generated here anymore - both are consumed only by STM32_Drivers_CPP
+# (irq_registry_config.h doesn't even compile without it), so the drivers
+# CMakeLists generates them itself from the chip facts this file exposes
+# (STM32_CORE / STM32_FLASH / STM32_SERIES_UC / STM32_NAME / STM32_VECTOR_FILE
+# / ${STM32_CORE}_SECTOR_MAP). Drivers are pulled in from the main
+# CMakeLists.txt (the DRIVERS section).
