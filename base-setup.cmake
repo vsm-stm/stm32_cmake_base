@@ -11,20 +11,20 @@ stm32_project(
 	DESCRIPTION "Base for STM32 cmake"
 
 	# ================================
-	# MCU chip selection
+	# Выбор чипа MCU
 	# ================================
 	# DEVICE = полноценный код чипа
 	# Пример: STM32F446RE, STM32F103C8, STM32G431KB
 	DEVICE STM32F446RE
 
 	# ================================
-	# Memory layout (heap / stack)
+	# Раскладка памяти (heap / stack)
 	# ================================
 	HEAP_SIZE  0x200   # _Min_Heap_Size
 	STACK_SIZE 0x400   # _Min_Stack_Size
 
 	# ================================
-	# Drivers
+	# Драйверы
 	# ================================
 	# DRIVERS — какие модули STM32_Drivers_CPP компилировать (system/rcc/gpio/
 	# flash/irq_registry подключаются всегда, если драйверы вообще нужны).
@@ -36,21 +36,21 @@ stm32_project(
 		UART SPI DMA TIM
 
 	# ================================
-	# Sources — только код приложения. startup/vector/linker и newlib-glue
+	# Исходники — только код приложения. startup/vector/linker и newlib-обвязка
 	# (no_system_files/*) подключаются автоматически в CMakeLists.txt.
 	# ================================
 	SOURCES
 		src/main.cpp
 
 	# ================================
-	# Include directories
+	# Каталоги заголовков
 	# ================================
 	INCLUDE_DIRS
 		inc
 )
 
 # ================================
-# Extra user defines / options / libs (пока без отдельных именованных
+# Пользовательские дефайны / опции / библиотеки (пока без отдельных именованных
 # аргументов в stm32_project — расширим при первой реальной надобности)
 # ================================
 set(symbols_c_SYMB "")
