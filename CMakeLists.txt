@@ -80,7 +80,7 @@ if(CFG_use_drivers)
 		FetchContent_Declare(Drivers
 			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Drivers
 			GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
-			GIT_TAG        refactor-for-bootloader)
+			GIT_TAG        v2.1)
 		FetchContent_MakeAvailable(Drivers)
 	endif()
 	set(_fw_link stm32_drivers)
