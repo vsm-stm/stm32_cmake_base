@@ -1,111 +1,102 @@
-cmake_minimum_required(VERSION 3.22)
-################################## БАЗОВАЯ НАСТРОЙКА ###############################################################
-include("${CMAKE_CURRENT_SOURCE_DIR}/base-setup.cmake")
+cmake_minimum_required(VERSION 3.24)
 
-# Тулчейн — регистрируется через CMAKE_TOOLCHAIN_FILE (официальный механизм,
-# а не голый include()), поэтому он кешируется, попадает в
-# try_compile()/ExternalProject_Add() и виден инструментам IDE. Защита
-# `if(NOT ...)` означает, что явный -DCMAKE_TOOLCHAIN_FILE=... или пресет
-# всё равно побеждает; иначе именно это заставляет проект собираться нужным
-# компилятором даже вообще без пресета.
+# ─── конфиг проекта: project.json -> CFG_* ───────────────────────────────────
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/functions.cmake)
+stm32_read_config(${CMAKE_CURRENT_SOURCE_DIR}/project.json)
+
+# ─── тулчейн (только «какой компилятор»; флаги — в stm32_platform и пресетах) ─
 if(NOT CMAKE_TOOLCHAIN_FILE)
-	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/gcc-arm-none-eabi.cmake"
+	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/toolchain.cmake"
 		CACHE FILEPATH "STM32 arm-none-eabi toolchain" FORCE)
 endif()
 
-################################## НАСТРОЙКА ПРОЕКТА ###############################################################
-project(${PROJECT_NAME}
-	VERSION ${VER}
-	DESCRIPTION "${DESC}"
-	LANGUAGES C CXX ASM
-)
+project(${CFG_name} VERSION ${CFG_version} LANGUAGES C CXX ASM)
 
-# Общие стандарты (можно переопределять из cache/preset)
-set(CMAKE_C_STANDARD 11 CACHE STRING "C standard")
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
-
-set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard")
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Полезно при работе с IDE и статанализаторами
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-message(STATUS "Project: ${PROJECT_NAME}")
-message(STATUS "Device: ${DEVICE}")
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "Project: ${CFG_name}  Device: ${CFG_device}  Build: ${CMAKE_BUILD_TYPE}")
 
-############################# Параметры MCU / CPU + CMSIS ##################################
-# скачиваем CMSIS
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/cmsis-download.cmake")
+# ─── скачивание CMSIS/startup/векторов + разбор CFG_device ──────────────────
+#     даёт main_cpu_PARAMS, STM32_*, STM32_LINKER_TEMPLATE, STM32_STARTUP_SRCS,
+#     STM32_FLASH_SECTORS, HEAP_SIZE/STACK_SIZE, RAM_* ...
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/cmsis-download.cmake)
 
-################################## ЦЕЛЬ ПЛАТФОРМЫ ###############################################################
-# Одна INTERFACE-библиотека, несущая всё специфичное для MCU/платформы: include-
-# каталоги CMSIS + устройства, дефайны устройства и флаги cpu/fpu. И
-# исполняемый файл прошивки, и stm32_drivers просто линкуют её — ни тому, ни
-# другому не нужно знать, где лежит cmsis-core/ и что такое STM32_CORE.
+# ─── stm32_platform: один INTERFACE-таргет со всеми флагами ──────────────────
+#     линкуют и прошивка (stm32_add_firmware), и stm32_drivers — ни тому, ни
+#     другому не нужно знать про cmsis-core/ или про cpu/fpu чипа.
+
+# Здесь только флаги, не зависящие от конфигурации. Оптимизация и отладка
+# (-Og/-O0/-Os, -g*, NDEBUG) задаются в CMakePresets.json через
+# CMAKE_<LANG>_FLAGS_<CONFIG> — по одному пресету на вариант сборки.
+if(NOT CMAKE_BUILD_TYPE)
+	message(WARNING "CMAKE_BUILD_TYPE не задан — оптимизации нет. Используйте пресет: cmake --preset debug|release|...")
+endif()
+
 add_library(stm32_platform INTERFACE)
+
 target_include_directories(stm32_platform INTERFACE
 	${CMAKE_SOURCE_DIR}/cmsis-core/Include
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include
 )
 target_compile_definitions(stm32_platform INTERFACE
-	${c_target}
-	${STM32_DEVICE_UC}
-	${STM32_CORE}
-	${STM32_FLASH_def}
+	${c_target}          # STM32F446xx — под этим именем CMSIS подключает регистры
+	${STM32_DEVICE_UC}   # STM32F446RE
+	${STM32_CORE}        # STM32F4
 )
-target_compile_options(stm32_platform INTERFACE -mthumb ${main_cpu_PARAMS} ${cpu_PARAMS})
-target_link_options(stm32_platform    INTERFACE -mthumb ${main_cpu_PARAMS} ${cpu_PARAMS})
+target_compile_options(stm32_platform INTERFACE
+	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu из *-map.cmake
+	-fdata-sections -ffunction-sections            # для -Wl,--gc-sections
+	$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -fno-threadsafe-statics>
+	-Wall -Wextra -Wpedantic -Wno-unused-parameter
+)
+target_link_options(stm32_platform INTERFACE
+	-mthumb ${main_cpu_PARAMS}
+	-Wl,--gc-sections
+	--specs=nano.specs --specs=nosys.specs
+	-Wl,--start-group -lc -lm -lstdc++ -lsupc++ -Wl,--end-group
+	-Wl,-z,max-page-size=8            # плотная упаковка секций по адресам
+	-Wl,--wrap=__register_exitproc    # C++ статические деструкторы не нужны без ОС
+	-Wl,--print-memory-usage
+)
 
-# Уровень оптимизации для Debug-сборок. -Og — по умолчанию (удобно для отладки,
-# но оптимизировано); пресет "debug-o0" опускает его до -O0 для полностью
-# пошаговой отладки (все переменные живы, без инлайна/перестановок). Читается
-# в stm32_add_firmware().
-set(STM32_DEBUG_OPT "-Og" CACHE STRING "Optimisation flag for Debug builds (-Og / -O0 / ...)")
-
-################################## ДРАЙВЕРЫ ###############################################################
-# stm32_drivers (STM32_Drivers_CPP) живёт внутри проекта в Drivers/. Первая
-# конфигурация клонирует их туда; дальше они просто add_subdirectory()-ятся
-# как есть каждую конфигурацию (FetchContent НЕ должен их ре-синкать —
-# скачанные файлы правятся/коммитятся на месте). Читает STM32_DRIVERS_REQUESTED
-# из stm32_project(DRIVERS ...). См. ARCHITECTURE.md §04.5.
-set(_fw_libs "")
-if(USE_DRIVERS)
-	if(NOT EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
-		message(STATUS "Drivers: cloning into Drivers/ ...")
+# ─── драйверы ──────────────────────────────────────────────────────────────
+#     "drivers" в project.json: нет ключа / null / false = не собирать вообще;
+#     true или [] = только ядро; ["UART", ...] = ядро + модули.
+#     1-я конфигурация клонирует в Drivers/, дальше add_subdirectory как есть.
+set(_fw_link "")
+if(CFG_use_drivers)
+	set(STM32_DRIVERS_REQUESTED "${CFG_drivers}" CACHE STRING
+		"Опциональные модули драйверов" FORCE)
+	if(EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
+		add_subdirectory(Drivers "${CMAKE_BINARY_DIR}/_deps/drivers-build")
+	else()
 		include(FetchContent)
-		FetchContent_Declare(
-			Drivers
+		FetchContent_Declare(Drivers
 			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Drivers
 			GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
-			GIT_TAG        refactor-for-bootloader
-		)
+			GIT_TAG        refactor-for-bootloader)
 		FetchContent_MakeAvailable(Drivers)
-	else()
-		message(STATUS "Drivers: Drivers/ (in-tree)")
-		add_subdirectory(
-			"${CMAKE_SOURCE_DIR}/Drivers"
-			"${CMAKE_BINARY_DIR}/_deps/drivers-build"
-		)
 	endif()
-	list(APPEND _fw_libs stm32_drivers)
+	set(_fw_link stm32_drivers)
+else()
+	message(STATUS "Drivers: disabled (\"drivers\" = null/false/absent in project.json)")
 endif()
 
-################################## ОБРАЗ ПРОШИВКИ ###############################################################
-# Один декларативный вызов собирает прошиваемый образ: линкер-скрипт (под окно
-# флеша этого образа), исполняемый файл, обязательную обвязку startup/newlib,
-# общий набор флагов и post-build .hex/.bin/.dis. APP_START_SECTOR (из
-# stm32_project()) смещает образ над загрузчиком; не задан = начало флеша.
-set(_fw_sector "")
-if(NOT APP_START_SECTOR STREQUAL "")
-	set(_fw_sector START_SECTOR ${APP_START_SECTOR})
+# ─── образ прошивки ─────────────────────────────────────────────────────────
+set(_sector "")
+if(NOT CFG_start_sector STREQUAL "")
+	list(APPEND _sector START_SECTOR ${CFG_start_sector})
 endif()
 
-stm32_add_firmware(${CMAKE_PROJECT_NAME}
-	${_fw_sector}
-	SOURCES       ${sources_SRCS}
-	INCLUDE_DIRS  ${include_DIRS}
-	LINK_LIBS     ${_fw_libs}
+stm32_add_firmware(${CFG_name}
+	${_sector}
+	SOURCES       ${CFG_sources}
+	INCLUDE_DIRS  ${CFG_include_dirs}
+	LINK          ${_fw_link}
 )

@@ -53,6 +53,7 @@
   "cortex-debug.variableUseNaturalFormat": false,
 
   "files.associations": {
+    "project.json": "jsonc",
     "cmath": "cpp",
     "deque": "cpp",
     "list": "cpp",

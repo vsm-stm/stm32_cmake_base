@@ -14,35 +14,44 @@
 			"name": "debug",
 			"inherits": "default",
 			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "Debug"
+				"CMAKE_BUILD_TYPE": "Debug",
+				"CMAKE_C_FLAGS_DEBUG":   "-Og -g3 -ggdb",
+				"CMAKE_CXX_FLAGS_DEBUG": "-Og -g3 -ggdb"
 			}
 		},
 		{
 			"name": "debug-o0",
 			"inherits": "debug",
 			"cacheVariables": {
-				"STM32_DEBUG_OPT": "-O0"
+				"CMAKE_C_FLAGS_DEBUG":   "-O0 -g3 -ggdb",
+				"CMAKE_CXX_FLAGS_DEBUG": "-O0 -g3 -ggdb"
 			}
 		},
 		{
 			"name": "relWithDebInfo",
 			"inherits": "default",
 			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "RelWithDebInfo"
+				"CMAKE_BUILD_TYPE": "RelWithDebInfo",
+				"CMAKE_C_FLAGS_RELWITHDEBINFO":   "-Os -g3 -DNDEBUG",
+				"CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-Os -g3 -DNDEBUG"
 			}
 		},
 		{
 			"name": "release",
 			"inherits": "default",
 			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "Release"
+				"CMAKE_BUILD_TYPE": "Release",
+				"CMAKE_C_FLAGS_RELEASE":   "-Os -g0 -DNDEBUG",
+				"CMAKE_CXX_FLAGS_RELEASE": "-Os -g0 -DNDEBUG"
 			}
 		},
 		{
 			"name": "minSizeRel",
 			"inherits": "default",
 			"cacheVariables": {
-				"CMAKE_BUILD_TYPE": "MinSizeRel"
+				"CMAKE_BUILD_TYPE": "MinSizeRel",
+				"CMAKE_C_FLAGS_MINSIZEREL":   "-Os -g0 -DNDEBUG",
+				"CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -g0 -DNDEBUG"
 			}
 		}
 	],

@@ -1,29 +1,29 @@
 # ============================================================================
-# cmsis-download.cmake — "файл, который всё скачивает"
+# cmsis-download.cmake — скачать файлы под чип и разобрать его параметры
 # ============================================================================
-#
-# По DEVICE (напр. "STM32F446RE", задаётся в base-setup.cmake через
-# stm32_project()) этот файл:
+# Процедурный файл, include()-ится из CMakeLists.txt после project(). По
+# CFG_device (из project.json):
 #
 #   1. разбирает имя устройства на семейство/модель/букву размера флеша,
 #   2. ловит смену чипа между реконфигурациями и, если она была, стирает
 #      устаревшие скачанные файлы и build-каталог,
 #   3. скачивает (или переиспользует уже лежащие) заголовки CMSIS, стартовый
 #      код, таблицу векторов и SVD из STM32-base_files,
-#   4. выбирает нужный шаблон линкер-скрипта для этого семейства.
+#   4. выбирает шаблон линкер-скрипта для этого семейства.
 #
-# Два генерируемых заголовка flash_config.h / irq_registry_config.h здесь
-# НЕ создаются — они нужны только драйверам, поэтому STM32_Drivers_CPP
-# генерирует их сам. Подключение драйверов — отдельная задача, она в главном
-# CMakeLists.txt (секция DRIVERS).
+# Флаги компилятора/линкера (таргет stm32_platform) и подключение драйверов —
+# НЕ здесь, а в CMakeLists.txt: этот файл только достаёт файлы и факты.
 #
-# Всё, что этот файл скачивает или генерирует, ложится в
-# cmsis-core/download_files/ и должно коммититься после первой загрузки —
-# см. ARCHITECTURE.md §04.4. download_one() (functions.cmake) делает шаг 3
-# no-op после первой конфигурации для данного чипа.
+# Выход наружу (читают CMakeLists.txt, stm32_add_firmware(), Drivers/CMakeLists):
+#   main_cpu_PARAMS  c_target  STM32_DEVICE_UC  STM32_CORE  STM32_FLASH
+#   STM32_RAM  STM32_EXTRA  STM32_SERIES_UC  STM32_NAME  STM32_VECTOR_FILE
+#   STM32_LINKER_TEMPLATE  STM32_STARTUP_SRCS  STM32_FLASH_SECTORS
+#   HEAP_SIZE  STACK_SIZE  RAM_ORIGIN  RAM_LENGTH  (+ переменные MEMORY семейства)
+#
+# functions.cmake должен быть include()-нут раньше (это делает CMakeLists.txt).
+# Всё скачанное ложится в cmsis-core/download_files/ и коммитится после первой
+# загрузки; download_one() делает шаг 3 no-op на последующих конфигурациях.
 # ============================================================================
-
-include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
 
 # ============================================================================
 # 1. Разбор имени устройства
@@ -42,15 +42,15 @@ include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
 #                                                        в имя линкер-скрипта:
 #                                                        STM32F446xE.ld)
 # Это позиционная нарезка строки, а не настоящий парсер — предполагается что
-# DEVICE всегда 11-символьный партномер ровно этой грамматики (семейство+тип+
-# корпус+буква флеша). Имя короче/длиннее или не по грамматике (напр. деталь
-# без буквы корпуса) нарежется неправильно без ошибки — сверки со схемой
-# именования STM32 тут нет, есть только проверка что нарезанное имя есть в
-# map-таблице семейства ниже.
-string(SUBSTRING "${DEVICE}" 0 11 DEVICE)
+# CFG_device всегда 11-символьный партномер ровно этой грамматики (семейство+
+# тип+корпус+буква флеша). Имя короче/длиннее или не по грамматике (напр.
+# деталь без буквы корпуса) нарежется неправильно без ошибки — сверки со
+# схемой именования STM32 тут нет, есть только проверка что нарезанное имя
+# есть в map-таблице семейства ниже.
+string(SUBSTRING "${CFG_device}" 0 11 STM32_DEVICE)
 
-string(TOLOWER ${DEVICE} STM32_DEVICE_LC)
-string(TOUPPER ${DEVICE} STM32_DEVICE_UC)
+string(TOLOWER ${STM32_DEVICE} STM32_DEVICE_LC)
+string(TOUPPER ${STM32_DEVICE} STM32_DEVICE_UC)
 message(STATUS "Device_LC: " ${STM32_DEVICE_LC})
 message(STATUS "Device_UC: " ${STM32_DEVICE_UC})
 
@@ -76,59 +76,11 @@ message(STATUS "last_letter: " ${last_letter}) # todo
 message(STATUS "c_target: " ${c_target})
 
 # ============================================================================
-# 2. Обнаружение смены устройства
+# 2. Смена устройства
 # ============================================================================
-# STM32_CONFIGURED_DEVICE хранит в кеше CMake, под какой чип *текущий
-# build-каталог* конфигурировался в последний раз. Если DEVICE с тех пор
-# изменился, каждый ранее скачанный/сгенерированный файл (линкер-скрипт,
-# заголовки, flash_config.h, ...) принадлежит старому чипу и переиспользовать
-# его нельзя — поэтому перед повторной загрузкой стираем
-# cmsis-core/download_files/ и build-каталог.
-if(NOT DEFINED STM32_CONFIGURED_DEVICE)
-  # Первая конфигурация
-  message(STATUS
-    "Initial STM32 configuration for device: ${DEVICE}"
-  )
-
-  set(STM32_CONFIGURED_DEVICE
-      "${DEVICE}"
-      CACHE STRING
-      "STM32 device this build directory was configured for"
-  )
-
-else()
-	# Повторная конфигурация
-	if(NOT STM32_CONFIGURED_DEVICE STREQUAL DEVICE)
-		message(WARNING
-		"STM32 device changed:\n"
-		"  old: ${STM32_CONFIGURED_DEVICE}\n"
-		"  new: ${DEVICE}\n"
-		"Cleaning downloaded STM32 files."
-		)
-
-		file(REMOVE_RECURSE
-		${CMAKE_SOURCE_DIR}/cmsis-core/download_files
-		${CMAKE_SOURCE_DIR}/cmsis-core/generated
-		${CMAKE_SOURCE_DIR}/cmsis-core/drivers_gen
-		)
-
-		# чистим артефакты сборки
-		stm32_clean_build_dir()
-
-		set(STM32_CONFIGURED_DEVICE
-			"${DEVICE}"
-			CACHE STRING
-			"STM32 device this build directory was configured for"
-			FORCE
-		)
-	else()
-		message(STATUS
-		"STM32 device unchanged: ${DEVICE}"
-		)
-	endif()
-endif()
-
-
+# Скачанное под другой чип (или без маркера) стирается, маркер обновляется —
+# вся логика в stm32_sync_device() (functions.cmake).
+stm32_sync_device("${STM32_DEVICE}")
 
 # ============================================================================
 # 3. Загрузка CMSIS / startup / векторов / SVD для этого устройства
@@ -170,7 +122,7 @@ message(STATUS "STM32_NAME   = ${STM32_NAME}")
 # Раскладка секторов стирания под этот конкретный объём флеша — готовый
 # список "addr;size;...", дописанный в тот же map-файл скриптом
 # STM32-base_files/flash_sectors.py. Его читают stm32_sector_to_address()
-# (functions.cmake) и stm32_add_firmware() (Platform.cmake); а также
+# (functions.cmake) и stm32_add_firmware() (там же); а также
 # flash_config.h драйверов.
 set(STM32_FLASH_SECTORS "${${STM32_CORE}_SECTORS_${STM32_FLASH}}")
 if(NOT STM32_FLASH_SECTORS)
@@ -246,26 +198,19 @@ download_one(
 # ============================================================================
 # 4. Линкер-скрипт: выбираем шаблон под семейство (рендер — в stm32_add_firmware)
 # ============================================================================
-
-message(STATUS "Using linker script : ${LD_TEMPLATE}")
-message(STATUS "FLASH               : ${STM32_FLASH}")
-message(STATUS "RAM                 : ${STM32_RAM}")
-message(STATUS "EXTRA               : ${STM32_EXTRA}")
-
 # FLASH_ORIGIN / FLASH_LENGTH здесь НЕ задаются — они зависят от стартового
 # сектора линкуемого образа (загрузчик или приложение), поэтому
 # stm32_add_firmware() разрешает их для каждой цели и там же рендерит
 # линкер-скрипт.
 
+message(STATUS "FLASH : ${STM32_FLASH}   RAM : ${STM32_RAM}   EXTRA : ${STM32_EXTRA}")
+
 set(RAM_ORIGIN 0x20000000)
 set(RAM_LENGTH ${STM32_RAM})
 
-if(NOT DEFINED HEAP_SIZE)
-	set(HEAP_SIZE 0x200)
-endif()
-if(NOT DEFINED STACK_SIZE)
-	set(STACK_SIZE 0x400)
-endif()
+# heap/stack приходят из project.json (stm32_read_config подставил умолчания)
+set(HEAP_SIZE  ${CFG_heap})
+set(STACK_SIZE ${CFG_stack})
 
 # Каждому семейству ниже нужна своя раскладка MEMORY{}, потому что
 # дополнительная область RAM (или её отсутствие) у всех разная: F7 делит RAM
@@ -330,6 +275,8 @@ else()
 endif()
 
 
+message(STATUS "Linker template : ${LD_TEMPLATE}")
+
 download_one(
 	"${LD_TEMPLATE}"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker"
@@ -337,12 +284,13 @@ download_one(
 
 # Только шаблон — stm32_add_firmware() рендерит его для каждой цели (каждый
 # образ задаёт свои FLASH_ORIGIN / FLASH_LENGTH от своего стартового сектора).
-set(LD_IN  ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${LD_TEMPLATE})
+set(STM32_LINKER_TEMPLATE  ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${LD_TEMPLATE})
+
 
 # flash_config.h (карта секторов) и irq_registry_config.h (заглушки диспетчера
-# IRQ) здесь больше НЕ генерируются — оба нужны только STM32_Drivers_CPP
+# IRQ) здесь НЕ генерируются — оба нужны только STM32_Drivers_CPP
 # (irq_registry_config.h вообще не компилируется без него), поэтому CMakeLists
 # драйверов генерирует их сам из фактов о чипе, которые открывает этот файл
 # (STM32_CORE / STM32_FLASH / STM32_SERIES_UC / STM32_NAME / STM32_VECTOR_FILE
-# / STM32_FLASH_SECTORS). Драйверы подключаются из главного CMakeLists.txt
-# (секция DRIVERS).
+# / STM32_FLASH_SECTORS). Таргет stm32_platform и подключение драйверов — в
+# главном CMakeLists.txt.
