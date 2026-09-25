@@ -9,7 +9,7 @@
 #   stm32_add_firmware()     — собрать один прошиваемый образ
 #   download_one()           — тянет один файл из STM32-base_files, пропускает
 #                              если он уже лежит рядом
-#   stm32_sector_to_address()— номер сектора -> адрес + длина до конца флеша
+#   stm32_flash_window()     — сектора [START, END) -> адрес начала + длина в байтах
 #   k_to_int()               — "128K" -> 128
 #   stm32_sync_device()      — смена чипа: стереть чужие скачанные файлы + build,
 #                              записать маркер .device
@@ -44,7 +44,7 @@ endfunction()
 #   CFG_sources CFG_include_dirs        — списки (могут быть пустыми)
 #   CFG_use_drivers                     — ON/OFF (см. ниже про "drivers")
 #   CFG_drivers                         — список опциональных модулей
-#   CFG_start_sector                    — "" если null / отсутствует
+#   CFG_start_sector CFG_end_sector     — "" если null / отсутствует
 #
 # "drivers" в project.json:
 #   нет ключа / null / false  -> драйверы не собираются вообще (CFG_use_drivers OFF)
@@ -111,14 +111,16 @@ function(stm32_read_config PATH)
 		message(FATAL_ERROR "project.json: \"drivers\" должен быть массивом, true/false или null")
 	endif()
 
-	# --- start_sector: число, либо "" при null / отсутствии ---
-	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" start_sector)
-	if(_e OR _t STREQUAL "NULL")
-		set(CFG_start_sector "" PARENT_SCOPE)
-	else()
-		string(JSON _v GET "${_cfg}" start_sector)
-		set(CFG_start_sector "${_v}" PARENT_SCOPE)
-	endif()
+	# --- start_sector / end_sector: число, либо "" при null / отсутствии ---
+	foreach(_k start_sector end_sector)
+		string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" ${_k})
+		if(_e OR _t STREQUAL "NULL")
+			set(CFG_${_k} "" PARENT_SCOPE)
+		else()
+			string(JSON _v GET "${_cfg}" ${_k})
+			set(CFG_${_k} "${_v}" PARENT_SCOPE)
+		endif()
+	endforeach()
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,8 @@ endfunction()
 #               "Device/STM32F4xx/Include/stm32f446xx.h"
 #
 # Скачивает BASE_DIR/FILE_NAME из STM32-base_files, если его там ещё нет.
+# Четвёртый аргумент OPTIONAL — файл необязательный (напр. SVD, нужен только
+# отладчику): при неудаче выводится предупреждение, а не ошибка конфигурации.
 #
 # "Уже на месте и непустой" всегда побеждает и никогда не перекачивается — это
 # сознательно, не просто оптимизация. В конечном проекте весь каталог загрузки
@@ -141,6 +145,11 @@ endfunction()
 # устаревание каждого файла по отдельности.
 # ---------------------------------------------------------------------------
 function(download_one FILE_NAME BASE_DIR URL_DIR)
+	set(_optional FALSE)
+	if("OPTIONAL" IN_LIST ARGN)
+		set(_optional TRUE)
+	endif()
+
 	set(DEST "${BASE_DIR}/${FILE_NAME}")
 	set(URL  "https://raw.githubusercontent.com/vsm-stm/STM32-base_files/refs/heads/master/${URL_DIR}")
 
@@ -169,6 +178,10 @@ function(download_one FILE_NAME BASE_DIR URL_DIR)
 
 	if(NOT CODE EQUAL 0)
 		file(REMOVE "${DEST}")
+		if(_optional)
+			message(WARNING "Optional file not available, skipped: ${URL}")
+			return()
+		endif()
 		message(FATAL_ERROR "Download failed: ${URL}\n${MSG}")
 	endif()
 
@@ -196,35 +209,69 @@ function(k_to_int K_STR OUT)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# stm32_sector_to_address(SECTOR  OUT_ADDR  OUT_LEN)
+# stm32_flash_window(START END OUT_ORIGIN OUT_LENGTH)
 #
-# SECTOR   номер сектора стирания (с 0), с которого должен начинаться образ.
-# OUT_ADDR <- абсолютный начальный адрес этого сектора (напр. 0x08004000)
-# OUT_LEN  <- байт от него до конца флеша (для LENGTH в линкер-скрипте)
+# Окно флеша образа: сектора стирания [START, END) — START включительно, END
+# НЕ включительно (это номер сектора, с которого начинается следующий образ).
 #
-# Читает STM32_FLASH_SECTORS (список "addr;size;addr;size;...", разрешённый
-# в cmsis-download.cmake из скачанной map-таблицы). Конец флеша — адрес плюс
-# размер последнего сектора, отдельного размера всего флеша не нужно.
-# Выход за диапазон — ошибка.
+#   START ""  -> 0                   (с начала флеша)
+#   END   ""  -> число секторов чипа (до конца флеша)
+#
+# OUT_ORIGIN <- абсолютный адрес начала сектора START (напр. 0x08010000)
+# OUT_LENGTH <- байт от него до начала сектора END (или до конца флеша)
+#
+# Читает STM32_FLASH_SECTORS (список "addr;size;addr;size;...", разрешённый в
+# cmsis-download.cmake из скачанной map-таблицы). Конец флеша — адрес плюс размер
+# последнего сектора. Нецелые значения, выход за диапазон и END <= START —
+# ошибка на этапе конфигурации.
 # ---------------------------------------------------------------------------
-function(stm32_sector_to_address SECTOR OUT_ADDR OUT_LEN)
+function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 	list(LENGTH STM32_FLASH_SECTORS _n)
 	math(EXPR _count "${_n} / 2")
-	if(SECTOR LESS 0 OR SECTOR GREATER_EQUAL _count)
+
+	if("${START}" STREQUAL "")
+		set(START 0)
+	endif()
+	if("${END}" STREQUAL "")
+		set(END ${_count})
+	endif()
+
+	foreach(_name START END)
+		if(NOT "${${_name}}" MATCHES "^[0-9]+$")
+			message(FATAL_ERROR
+				"stm32_flash_window: ${_name} должен быть целым числом >= 0, "
+				"получено '${${_name}}'")
+		endif()
+	endforeach()
+	math(EXPR _last "${_count} - 1")
+	if(START GREATER_EQUAL _count)
 		message(FATAL_ERROR
-			"stm32_sector_to_address: sector ${SECTOR} out of range - "
-			"this chip has ${_count} erase sectors (0..${_count}-1)")
+			"stm32_flash_window: start_sector ${START} вне диапазона - у чипа "
+			"${_count} секторов стирания (номера 0..${_last})")
+	endif()
+	if(END GREATER _count OR NOT END GREATER START)
+		message(FATAL_ERROR
+			"stm32_flash_window: end_sector ${END} недопустим для start_sector "
+			"${START} - нужно ${START} < end_sector <= ${_count} (end_sector не "
+			"включается в образ; ${_count} = до конца флеша)")
 	endif()
 
 	# список плоский: [addr0 size0 addr1 size1 ...], поэтому индекс адреса = N*2
-	math(EXPR _ai "${SECTOR} * 2")
-	list(GET STM32_FLASH_SECTORS ${_ai} _addr)
-	list(GET STM32_FLASH_SECTORS -2 _end_a)   # адрес последнего сектора
-	list(GET STM32_FLASH_SECTORS -1 _end_s)   # размер последнего сектора
-	math(EXPR _len "${_end_a} + ${_end_s} - ${_addr}")
+	math(EXPR _si "${START} * 2")
+	list(GET STM32_FLASH_SECTORS ${_si} _origin)
 
-	set(${OUT_ADDR} "${_addr}" PARENT_SCOPE)
-	set(${OUT_LEN}  "${_len}"  PARENT_SCOPE)
+	if(END EQUAL _count)
+		list(GET STM32_FLASH_SECTORS -2 _last_a)   # адрес последнего сектора
+		list(GET STM32_FLASH_SECTORS -1 _last_s)   # размер последнего сектора
+		math(EXPR _end_addr "${_last_a} + ${_last_s}")
+	else()
+		math(EXPR _ei "${END} * 2")
+		list(GET STM32_FLASH_SECTORS ${_ei} _end_addr)
+	endif()
+	math(EXPR _len "${_end_addr} - ${_origin}")
+
+	set(${OUT_ORIGIN} "${_origin}" PARENT_SCOPE)
+	set(${OUT_LENGTH} "${_len}"    PARENT_SCOPE)
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -287,16 +334,19 @@ endfunction()
 
 # ---------------------------------------------------------------------------
 # stm32_add_firmware(TARGET  SOURCES ...  [INCLUDE_DIRS ...]  [LINK ...]
-#                           [START_SECTOR N])
+#                           [START_SECTOR N] [END_SECTOR M])
 #
 # Собирает один прошиваемый образ. Всё общее — флаги cpu/fpu, libc, warnings,
 # линкер-флаги — приходит из таргета stm32_platform (создаётся в CMakeLists.txt);
 # оптимизация и отладка — из пресета (CMAKE_<LANG>_FLAGS_<CONFIG>). Здесь только
 # то, что своё у каждого образа: окно флеша, линкер-скрипт, exe, post-build.
 #
-# START_SECTOR — номер сектора стирания, с которого начинать (с 0). Не задан =
-#   вся флешка (обычный одиночный проект). > 0 — образ над загрузчиком:
-#   LENGTH в линкере обрезается до "от этого сектора до конца флеша".
+# START_SECTOR — номер сектора стирания, с которого начинать (с 0). Не задан = 0.
+# END_SECTOR   — номер сектора, с которого начинается СЛЕДУЮЩИЙ образ (сам не
+#   входит в этот). Не задан = до конца флеша. Линкер получает FLASH LENGTH строго
+#   по этому окну, поэтому образ, не влезший в свои сектора, — ошибка линковки
+#   (region FLASH overflowed), а не тихое наложение на соседний образ.
+#   Пример: загрузчик START 0 END 4, приложение START 4 (без END).
 #
 # Читает из области верхнего уровня: таргет stm32_platform (CMakeLists.txt) и
 # то, что задаёт cmsis-download.cmake — STM32_LINKER_TEMPLATE,
@@ -306,17 +356,10 @@ endfunction()
 # отработал cmsis-download.cmake, — из CMakeLists.txt.
 # ---------------------------------------------------------------------------
 function(stm32_add_firmware TARGET)
-	cmake_parse_arguments(FW "" "START_SECTOR" "SOURCES;INCLUDE_DIRS;LINK" ${ARGN})
+	cmake_parse_arguments(FW "" "START_SECTOR;END_SECTOR" "SOURCES;INCLUDE_DIRS;LINK" ${ARGN})
 
 	# --- окно флеша под этот образ ---
-	if(NOT "${FW_START_SECTOR}" STREQUAL "")
-		stm32_sector_to_address("${FW_START_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
-	else()
-		list(GET STM32_FLASH_SECTORS 0  FLASH_ORIGIN)
-		list(GET STM32_FLASH_SECTORS -2 _end_a)
-		list(GET STM32_FLASH_SECTORS -1 _end_s)
-		math(EXPR FLASH_LENGTH "${_end_a} + ${_end_s} - ${FLASH_ORIGIN}")
-	endif()
+	stm32_flash_window("${FW_START_SECTOR}" "${FW_END_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
 
 	# --- линкер-скрипт под эту цель ---
 	set(_ld "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.ld")

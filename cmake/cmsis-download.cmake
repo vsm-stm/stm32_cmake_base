@@ -121,7 +121,7 @@ message(STATUS "STM32_NAME   = ${STM32_NAME}")
 
 # Раскладка секторов стирания под этот конкретный объём флеша — готовый
 # список "addr;size;...", дописанный в тот же map-файл скриптом
-# STM32-base_files/flash_sectors.py. Его читают stm32_sector_to_address()
+# STM32-base_files/flash_sectors.py. Его читают stm32_flash_window()
 # (functions.cmake) и stm32_add_firmware() (там же); а также
 # flash_config.h драйверов.
 set(STM32_FLASH_SECTORS "${${STM32_CORE}_SECTORS_${STM32_FLASH}}")
@@ -139,7 +139,8 @@ endif()
 download_one(
 	"SVD.svd"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files"
-	"SVD/${STM32_SERIES_UC}/${STM32_MODEL_UC}.svd")
+	"SVD/${STM32_SERIES_UC}/${STM32_MODEL_UC}.svd"
+	OPTIONAL)   # SVD нужен только отладчику; нет файла — не ошибка
 
 # ----------------------------------------------------------------------------
 # скачиваем startup и файлы векторов
@@ -226,28 +227,36 @@ if(STM32_CORE STREQUAL "STM32F7")
 	set(DTCM_ORIGIN 0x20000000)
 	set(DTCM_LENGTH ${STM32_EXTRA})   # 64K или 128K
 
-	set(SRAM2_LENGTH 16K)
-
-	if(STM32_EXTRA STREQUAL "64K")
-		set(SRAM2_ORIGIN 0x2004C000)
-
-		set(SRAM1_ORIGIN 0x20010000)
-	elseif(STM32_EXTRA STREQUAL "128K")
-		set(SRAM2_ORIGIN 0x2007C000)
-
-		set(SRAM1_ORIGIN 0x20020000)
-	else()
+	if(NOT STM32_EXTRA STREQUAL "64K" AND NOT STM32_EXTRA STREQUAL "128K")
 		message(FATAL_ERROR "Invalid DTCM size for F7: ${STM32_EXTRA}")
 	endif()
 
-	k_to_int("${STM32_RAM}"   RAM_K)
-	k_to_int("${DTCM_LENGTH}" DTCM_K)
-	k_to_int("${SRAM2_LENGTH}" SRAM2_K)
+	# Расположение SRAM1 / SRAM2 берём из CMSIS-заголовка самого ST: SRAM1_BASE /
+	# SRAM2_BASE и размер SRAM2 в его комментарии. У F72x/F73x, F74x/F75x и
+	# F76x/F77x они разные (SRAM2 стоит по 0x2003C000 / 0x2004C000 / 0x2007C000),
+	# жёстко зашитые адреса подходили только одной из групп.
+	set(_f7_hdr "${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/${STM32_NAME}.h")
+	file(STRINGS "${_f7_hdr}" _f7_sram REGEX "^#define[ \t]+SRAM[12]_BASE[ \t]")
+	set(SRAM1_ORIGIN "")
+	set(SRAM2_ORIGIN "")
+	set(SRAM2_LENGTH 16K)
+	foreach(_l ${_f7_sram})
+		if(_l MATCHES "SRAM1_BASE[ \t]+(0x[0-9A-Fa-f]+)")
+			set(SRAM1_ORIGIN "${CMAKE_MATCH_1}")
+		elseif(_l MATCHES "SRAM2_BASE[ \t]+(0x[0-9A-Fa-f]+)")
+			set(SRAM2_ORIGIN "${CMAKE_MATCH_1}")
+			if(_l MATCHES "([0-9]+)[ \t]*KB[ \t]+RAM2")
+				set(SRAM2_LENGTH "${CMAKE_MATCH_1}K")
+			endif()
+		endif()
+	endforeach()
+	if(SRAM1_ORIGIN STREQUAL "" OR SRAM2_ORIGIN STREQUAL "")
+		message(FATAL_ERROR
+			"F7: в ${_f7_hdr} не найдены SRAM1_BASE / SRAM2_BASE (нужны для карты памяти)")
+	endif()
 
-	math(EXPR SRAM1_K
-		"${RAM_K} - ${DTCM_K} - ${SRAM2_K}"
-	)
-
+	# SRAM1 идёт до начала SRAM2
+	math(EXPR SRAM1_K "(${SRAM2_ORIGIN} - ${SRAM1_ORIGIN}) / 1024")
 	set(SRAM1_LENGTH "${SRAM1_K}K")
 
 elseif(STM32_CORE STREQUAL "STM32H7")

@@ -93,6 +93,9 @@ set(_sector "")
 if(NOT CFG_start_sector STREQUAL "")
 	list(APPEND _sector START_SECTOR ${CFG_start_sector})
 endif()
+if(NOT CFG_end_sector STREQUAL "")
+	list(APPEND _sector END_SECTOR ${CFG_end_sector})
+endif()
 
 stm32_add_firmware(${CFG_name}
 	${_sector}
