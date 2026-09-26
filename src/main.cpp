@@ -9,7 +9,7 @@ int main()
 {
 	// --- вариант на драйверах (нужен "drivers": true и раскомментированные includes в main.hpp) ---
 	// System::Init();
-	// ClockSystem::Init_calc_pll(180000000, ClockSystem::PLL_ClockSource::HSE, 8000000);
+	// ClockSystem::InitCalcPLL(180000000, ClockSystem::PLL_ClockSource::HSE, 8000000);
 	// System::Enable_CYCCNT();
 	// NUCLEO_LED.SetUp(PIN::TYPE::OUTPUT_PushPull);
 	// uint32_t tick = System::GetTick();
