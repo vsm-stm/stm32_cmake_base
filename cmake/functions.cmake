@@ -33,10 +33,25 @@ function(_stm32_json_array CFG KEY OUT)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# stm32_read_config(PATH)
+# _stm32_load_json(PATH OUT)   — внутренняя: файл -> строка JSON для string(JSON)
+#   Строки-комментарии (первый непробельный символ — //) вырезаются: string(JSON)
+#   понимает только строгий JSON. Хвостовые комментарии после значения не
+#   поддерживаются, а // внутри строковых значений (URL) не затрагивается.
+# ---------------------------------------------------------------------------
+function(_stm32_load_json PATH OUT)
+	if(NOT EXISTS "${PATH}")
+		message(FATAL_ERROR "нет файла ${PATH}")
+	endif()
+	file(READ "${PATH}" _j)
+	string(REGEX REPLACE "(^|\n)[ \t]*//[^\n]*" "\\1" _j "${_j}")
+	set(${OUT} "${_j}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# stm32_read_config(PATH PREFIX)
 #
-# Читает project.json и раскладывает его в переменные CFG_* в области
-# вызывающего (CMakeLists.txt). Вызывается ДО project() — часть значений
+# Читает project.json и раскладывает его в переменные ${PREFIX}_* (CFG_* для
+# проекта, BL_* для загрузчика) в области вызывающего. Вызывается ДО project() — часть значений
 # (name/version) нужны самому project().
 #
 #   CFG_name CFG_version CFG_device     — обязательные, иначе FATAL_ERROR
@@ -44,7 +59,18 @@ endfunction()
 #   CFG_sources CFG_include_dirs        — списки (могут быть пустыми)
 #   CFG_use_drivers                     — ON/OFF (см. ниже про "drivers")
 #   CFG_drivers                         — список опциональных модулей
-#   CFG_start_sector CFG_end_sector     — "" если null / отсутствует
+#   CFG_app_start_sector                — "" или N; только для проекта-загрузчика
+#                                         (верхний ключ app_start_sector: образ [0, N))
+#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag}
+#                                       — секция "bootloader" (см. ниже)
+#
+# "bootloader" в project.json приложения: null / нет ключа — без загрузчика,
+#   прошивка с начала флеша; объект {"app_start_sector": N, "repo": "<git url>",
+#   "tag": "<тег>"} — загрузчик в начале флеша, приложение — с сектора N
+#   (CFG_app_start_sector = N). Загрузчик подключается как драйверы: клонируется
+#   в Bootloader/, файлы берутся из его project.json, его CMakeLists.txt не
+#   используется. В project.json самого загрузчика тот же N задаётся верхним
+#   ключом "app_start_sector".
 #
 # "drivers" в project.json:
 #   нет ключа / null / false  -> драйверы не собираются вообще (CFG_use_drivers OFF)
@@ -56,16 +82,8 @@ endfunction()
 # код: ошибиться и дописать логику в конфиг нельзя. Допускаются строки-
 # комментарии, начинающиеся с // (как в JSONC).
 # ---------------------------------------------------------------------------
-function(stm32_read_config PATH)
-	if(NOT EXISTS "${PATH}")
-		message(FATAL_ERROR "stm32_read_config: нет файла ${PATH}")
-	endif()
-	file(READ "${PATH}" _cfg)
-
-	# Строки-комментарии (первый непробельный символ — //) вырезаем: string(JSON)
-	# понимает только строгий JSON. Хвостовые комментарии после значения не
-	# поддерживаются, а // внутри строковых значений (URL) не затрагивается.
-	string(REGEX REPLACE "(^|\n)[ \t]*//[^\n]*" "\\1" _cfg "${_cfg}")
+function(stm32_read_config PATH PREFIX)
+	_stm32_load_json("${PATH}" _cfg)
 
 	# --- обязательные строковые ключи ---
 	foreach(_k name version device)
@@ -73,7 +91,7 @@ function(stm32_read_config PATH)
 		if(_e)
 			message(FATAL_ERROR "project.json: нет обязательного ключа '${_k}'")
 		endif()
-		set(CFG_${_k} "${_v}" PARENT_SCOPE)
+		set(${PREFIX}_${_k} "${_v}" PARENT_SCOPE)
 	endforeach()
 
 	# --- heap / stack с умолчаниями ---
@@ -81,46 +99,86 @@ function(stm32_read_config PATH)
 	if(_e)
 		set(_v "0x200")
 	endif()
-	set(CFG_heap "${_v}" PARENT_SCOPE)
+	set(${PREFIX}_heap "${_v}" PARENT_SCOPE)
 
 	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" stack)
 	if(_e)
 		set(_v "0x400")
 	endif()
-	set(CFG_stack "${_v}" PARENT_SCOPE)
+	set(${PREFIX}_stack "${_v}" PARENT_SCOPE)
 
 	# --- массивы -> списки ---
-	foreach(_k sources include_dirs)
-		_stm32_json_array("${_cfg}" ${_k} _list)
-		set(CFG_${_k} "${_list}" PARENT_SCOPE)
-	endforeach()
+	_stm32_json_array("${_cfg}" sources      _sources)
+	_stm32_json_array("${_cfg}" include_dirs _include_dirs)
 
 	# --- drivers: тристейт (см. шапку функции) ---
 	string(JSON _dt ERROR_VARIABLE _e TYPE "${_cfg}" drivers)
-	set(CFG_drivers "" PARENT_SCOPE)
+	set(${PREFIX}_drivers "" PARENT_SCOPE)
+	set(_use_drivers OFF)
 	if(_e OR _dt STREQUAL "NULL")
-		set(CFG_use_drivers OFF PARENT_SCOPE)
+		set(${PREFIX}_use_drivers OFF PARENT_SCOPE)
 	elseif(_dt STREQUAL "BOOLEAN")
 		string(JSON _dv GET "${_cfg}" drivers)
-		set(CFG_use_drivers "${_dv}" PARENT_SCOPE)
+		set(_use_drivers "${_dv}")
+		set(${PREFIX}_use_drivers "${_dv}" PARENT_SCOPE)
 	elseif(_dt STREQUAL "ARRAY")
-		set(CFG_use_drivers ON PARENT_SCOPE)
+		set(_use_drivers ON)
+		set(${PREFIX}_use_drivers ON PARENT_SCOPE)
 		_stm32_json_array("${_cfg}" drivers _list)
-		set(CFG_drivers "${_list}" PARENT_SCOPE)
+		set(${PREFIX}_drivers "${_list}" PARENT_SCOPE)
 	else()
 		message(FATAL_ERROR "project.json: \"drivers\" должен быть массивом, true/false или null")
 	endif()
 
-	# --- start_sector / end_sector: число, либо "" при null / отсутствии ---
-	foreach(_k start_sector end_sector)
-		string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" ${_k})
-		if(_e OR _t STREQUAL "NULL")
-			set(CFG_${_k} "" PARENT_SCOPE)
-		else()
-			string(JSON _v GET "${_cfg}" ${_k})
-			set(CFG_${_k} "${_v}" PARENT_SCOPE)
-		endif()
+	# --- driver_sources: файлы только для сборки с драйверами (загрузчик) ---
+	_stm32_json_array("${_cfg}" driver_sources _driver_sources)
+
+	# --- пути в конфиге — от каталога этого project.json; наружу отдаём абсолютные ---
+	get_filename_component(_root "${PATH}" DIRECTORY)
+	foreach(_l _sources _include_dirs _driver_sources)
+		set(_abs "")
+		foreach(_r ${${_l}})
+			list(APPEND _abs "${_root}/${_r}")
+		endforeach()
+		set(${_l} "${_abs}")
 	endforeach()
+	set(${PREFIX}_driver_sources "${_driver_sources}" PARENT_SCOPE)
+	set(${PREFIX}_sources      "${_sources}"      PARENT_SCOPE)
+	set(${PREFIX}_include_dirs "${_include_dirs}" PARENT_SCOPE)
+
+	# --- app_start_sector верхнего уровня: только проект-загрузчик ---
+	set(${PREFIX}_app_start_sector "" PARENT_SCOPE)
+	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" app_start_sector)
+	if(NOT _e AND NOT _t STREQUAL "NULL")
+		string(JSON _v GET "${_cfg}" app_start_sector)
+		set(${PREFIX}_app_start_sector "${_v}" PARENT_SCOPE)
+	endif()
+
+	# --- bootloader: null / нет ключа -> без загрузчика; иначе объект ---
+	set(${PREFIX}_use_bootloader OFF PARENT_SCOPE)
+	set(${PREFIX}_bootloader_repo "" PARENT_SCOPE)
+	set(${PREFIX}_bootloader_tag  "" PARENT_SCOPE)
+	string(JSON _bt ERROR_VARIABLE _e TYPE "${_cfg}" bootloader)
+	if(NOT _e AND _bt STREQUAL "OBJECT")
+		string(JSON _bs ERROR_VARIABLE _e GET "${_cfg}" bootloader app_start_sector)
+		if(_e OR NOT "${_bs}" MATCHES "^[0-9]+$" OR _bs LESS 1)
+			message(FATAL_ERROR "project.json: bootloader.app_start_sector — целое число >= 1 (номер сектора, с которого начинается приложение)")
+		endif()
+		string(JSON _br ERROR_VARIABLE _e GET "${_cfg}" bootloader repo)
+		if(_e)
+			set(_br "https://github.com/vsm-stm/stm32-bootloader.git")
+		endif()
+		string(JSON _bg ERROR_VARIABLE _e GET "${_cfg}" bootloader tag)
+		if(_e)
+			set(_bg "main")
+		endif()
+		set(${PREFIX}_use_bootloader ON PARENT_SCOPE)
+		set(${PREFIX}_app_start_sector "${_bs}" PARENT_SCOPE)
+		set(${PREFIX}_bootloader_repo "${_br}" PARENT_SCOPE)
+		set(${PREFIX}_bootloader_tag  "${_bg}" PARENT_SCOPE)
+	elseif(NOT _e AND NOT _bt STREQUAL "NULL")
+		message(FATAL_ERROR "project.json: \"bootloader\" должен быть объектом или null")
+	endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -361,6 +419,10 @@ function(stm32_add_firmware TARGET)
 	# --- окно флеша под этот образ ---
 	stm32_flash_window("${FW_START_SECTOR}" "${FW_END_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
 
+	# границы окна образа — в исходники (загрузчику нужен адрес, с которого
+	# начинается следующий образ, т.е. приложение: STM32_IMAGE_FLASH_END)
+	math(EXPR _img_end "${FLASH_ORIGIN} + ${FLASH_LENGTH}" OUTPUT_FORMAT HEXADECIMAL)
+
 	# --- линкер-скрипт под эту цель ---
 	set(_ld "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.ld")
 	configure_file("${STM32_LINKER_TEMPLATE}" "${_ld}" @ONLY)
@@ -371,6 +433,9 @@ function(stm32_add_firmware TARGET)
 	target_include_directories(${TARGET} PRIVATE ${FW_INCLUDE_DIRS})
 	target_link_libraries(${TARGET} PRIVATE stm32_platform ${FW_LINK})
 	target_link_options(${TARGET} PRIVATE -T${_ld} -Wl,-Map=${TARGET}.map)
+	target_compile_definitions(${TARGET} PRIVATE
+		STM32_IMAGE_FLASH_ORIGIN=${FLASH_ORIGIN}U
+		STM32_IMAGE_FLASH_END=${_img_end}U)
 
 	# --- post-build: размер + .hex / .bin / .dis ---
 	add_custom_command(TARGET ${TARGET} POST_BUILD

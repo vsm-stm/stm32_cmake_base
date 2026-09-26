@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.24)
 
 # ─── конфиг проекта: project.json -> CFG_* ───────────────────────────────────
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/functions.cmake)
-stm32_read_config(${CMAKE_CURRENT_SOURCE_DIR}/project.json)
+include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
+stm32_read_config(${CMAKE_SOURCE_DIR}/project.json CFG)
 
 # ─── тулчейн (только «какой компилятор»; флаги — в stm32_platform и пресетах) ─
 if(NOT CMAKE_TOOLCHAIN_FILE)
-	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/toolchain.cmake"
+	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/toolchain.cmake"
 		CACHE FILEPATH "STM32 arm-none-eabi toolchain" FORCE)
 endif()
 
@@ -25,7 +25,7 @@ message(STATUS "Project: ${CFG_name}  Device: ${CFG_device}  Build: ${CMAKE_BUIL
 # ─── скачивание CMSIS/startup/векторов + разбор CFG_device ──────────────────
 #     даёт main_cpu_PARAMS, STM32_*, STM32_LINKER_TEMPLATE, STM32_STARTUP_SRCS,
 #     STM32_FLASH_SECTORS, HEAP_SIZE/STACK_SIZE, RAM_* ...
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/cmsis-download.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/cmsis-download.cmake)
 
 # ─── stm32_platform: один INTERFACE-таргет со всеми флагами ──────────────────
 #     линкуют и прошивка (stm32_add_firmware), и stm32_drivers — ни тому, ни
@@ -48,6 +48,7 @@ target_compile_definitions(stm32_platform INTERFACE
 	${c_target}          # STM32F446xx — под этим именем CMSIS подключает регистры
 	${STM32_DEVICE_UC}   # STM32F446RE
 	${STM32_CORE}        # STM32F4
+	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # для #include STM32_DEVICE_HEADER в коде без драйверов
 )
 target_compile_options(stm32_platform INTERFACE
 	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu из *-map.cmake
@@ -88,18 +89,61 @@ else()
 	message(STATUS "Drivers: disabled (\"drivers\" = null/false/absent in project.json)")
 endif()
 
-# ─── образ прошивки ─────────────────────────────────────────────────────────
-set(_sector "")
-if(NOT CFG_start_sector STREQUAL "")
-	list(APPEND _sector START_SECTOR ${CFG_start_sector})
+# ─── загрузчик (как драйверы) ────────────────────────────────────────────────
+#     "bootloader" в project.json: нет / null — без загрузчика, прошивка с начала
+#     флеша; {"app_start_sector": N, "repo": ..., "tag": ...} — загрузчик в начале
+#     флеша, секторы [0, N), приложение — с сектора N. 1-я конфигурация клонирует
+#     репозиторий в Bootloader/, дальше используется локальная копия. Его
+#     CMakeLists.txt НЕ используется: список файлов берётся из его project.json
+#     (тем же stm32_read_config), сборкой управляет этот файл.
+if(CFG_use_bootloader)
+	if(NOT EXISTS "${CMAKE_SOURCE_DIR}/Bootloader/project.json")
+		message(STATUS "Bootloader: cloning ${CFG_bootloader_repo} (${CFG_bootloader_tag}) into Bootloader/ ...")
+		include(FetchContent)
+		FetchContent_Declare(Bootloader
+			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Bootloader
+			GIT_REPOSITORY ${CFG_bootloader_repo}
+			GIT_TAG        ${CFG_bootloader_tag}
+			GIT_SHALLOW    TRUE
+			SOURCE_SUBDIR  _no_cmake_here_)   # только клонируем, его CMakeLists не запускаем
+		FetchContent_MakeAvailable(Bootloader)
+	else()
+		message(STATUS "Bootloader: Bootloader/ (in-tree)")
+	endif()
+
+	# тот же формат project.json, пути — относительно Bootloader/
+	stm32_read_config("${CMAKE_SOURCE_DIR}/Bootloader/project.json" BL)
+	set(_bl_sources ${BL_sources})
+	if(CFG_use_drivers)
+		list(APPEND _bl_sources ${BL_driver_sources})
+	endif()
+	stm32_add_firmware(bootloader
+		SOURCES       ${_bl_sources}
+		INCLUDE_DIRS  ${BL_include_dirs}
+		LINK          ${_fw_link}
+		START_SECTOR  0
+		END_SECTOR    ${CFG_app_start_sector}
+	)
 endif()
-if(NOT CFG_end_sector STREQUAL "")
-	list(APPEND _sector END_SECTOR ${CFG_end_sector})
+
+# ─── образ прошивки ─────────────────────────────────────────────────────────
+#     окно во флеше: без загрузчика — весь флеш; с загрузчиком — [N, конец);
+#     проект-загрузчик (app_start_sector в его project.json) — [0, N).
+set(_sector "")
+if(CFG_use_bootloader)
+	set(_sector START_SECTOR ${CFG_app_start_sector})
+elseif(NOT CFG_app_start_sector STREQUAL "")
+	set(_sector START_SECTOR 0 END_SECTOR ${CFG_app_start_sector})
+endif()
+
+set(_sources ${CFG_sources})
+if(CFG_use_drivers)
+	list(APPEND _sources ${CFG_driver_sources})
 endif()
 
 stm32_add_firmware(${CFG_name}
 	${_sector}
-	SOURCES       ${CFG_sources}
+	SOURCES       ${_sources}
 	INCLUDE_DIRS  ${CFG_include_dirs}
 	LINK          ${_fw_link}
 )
