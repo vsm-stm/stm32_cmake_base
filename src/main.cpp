@@ -1,60 +1,34 @@
+// Пример на чистом CMSIS (без драйверов): мигаем светодиодом Nucleo-F446RE (PA5).
+// Регистры — F4 (RCC->AHB1ENR); для другого семейства поправьте тактирование порта.
 #include <main.hpp>
-// #include "math.h"
 
-extern "C"
-{
-	#include "stm32f4xx.h"
-}
+// заголовок CMSIS выбранного чипа (define задаёт платформа, напр. "stm32f4xx.h")
+#include STM32_DEVICE_HEADER
 
 int main()
 {
+	// --- вариант на драйверах (нужен "drivers": true и раскомментированные includes в main.hpp) ---
 	// System::Init();
 	// ClockSystem::Init_calc_pll(180000000, ClockSystem::PLL_ClockSource::HSE, 8000000);
 	// System::Enable_CYCCNT();
 	// NUCLEO_LED.SetUp(PIN::TYPE::OUTPUT_PushPull);
-
 	// uint32_t tick = System::GetTick();
-	// uint32_t tick_now;
-	// char str[20] = {};
-	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-	GPIOB->MODER |= 1 << 2*7;
+
+	// --- вариант на CMSIS ---
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;                          // такты порта A
+	GPIOA->MODER  = (GPIOA->MODER & ~(3U << (5 * 2))) | (1U << (5 * 2));   // PA5 — выход
 
 	for(;;)
 	{
-		// tick_now = System::GetTick();
-		// if((tick_now - tick) > 500)
-		// {
-			// sprintf(str, "Tick: %ld\n", tick_now);
-			// System::SWOTrace(reinterpret_cast<uint8_t*>(str), sizeof(str));
-			// NUCLEO_LED.TogglePin_BB();
-		// }
+		// if((System::GetTick() - tick) > 500) { NUCLEO_LED.TogglePin_BB(); tick = System::GetTick(); }
 
-		GPIOB->ODR ^= 1 << 7;
-		for(uint32_t i = 0;i<1600000;i++){};
+		GPIOA->ODR ^= 1U << 5;
+		for(uint32_t i = 0; i < 1600000; i++){ __NOP(); }
 	}
 }
 
-extern "C" void NMI_Handler(void)
-{
-	while(1){};
-}
-
-extern "C" void HardFault_Handler(void)
-{
-	while(1){};
-}
-
-extern "C" void MemManage_Handler(void)
-{
-	while(1){};
-}
-
-extern "C" void BusFault_Handler(void)
-{
-	while(1){};
-}
-
-extern "C" void UsageFault_Handler(void)
-{
-	while(1){};
-}
+extern "C" void NMI_Handler(void)        { while(1){} }
+extern "C" void HardFault_Handler(void)  { while(1){} }
+extern "C" void MemManage_Handler(void)  { while(1){} }
+extern "C" void BusFault_Handler(void)   { while(1){} }
+extern "C" void UsageFault_Handler(void) { while(1){} }
