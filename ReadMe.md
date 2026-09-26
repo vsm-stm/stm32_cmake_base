@@ -14,14 +14,16 @@
 
 На верхнем уровне находятся:
 
-- `project.json` — **единственный файл конфигурации**: имя, версия, чип, heap/stack, список драйверов, исходники, include-пути, стартовый сектор. Только данные, без кода.
+- `project.json` — **единственный файл конфигурации**: имя, версия, чип, heap/stack, список драйверов, исходники, include-пути, загрузчик (`bootloader`). Только данные, без кода.
 - `CMakeLists.txt` — склейка: конфиг → тулчейн → `project()` → скачивание → таргет `stm32_platform` (флаги, не зависящие от конфигурации) → драйверы → `stm32_add_firmware()`. Правится редко.
 - `CMakePresets.json` — пресеты `debug`, `debug-o0`, `release`, `relWithDebInfo`, `minSizeRel`. Здесь же **единственное место флагов оптимизации и отладки** (`-Og/-O0/-Os`, `-g*`, `NDEBUG`) — через `CMAKE_<C|CXX>_FLAGS_<CONFIG>`.
 - `cmake/functions.cmake` — все функции платформы (чтение конфига, `stm32_add_firmware`, загрузка файлов), только определения.
 - `cmake/cmsis-download.cmake` — процедурный, выполняется один раз: скачивание CMSIS/startup/векторов, разбор чипа, выбор шаблона линкер-скрипта. Только достаёт файлы и факты — флагов здесь нет.
 - `cmake/toolchain.cmake` — выбор компилятора `arm-none-eabi-*`.
-- `src/` — пользовательский код приложения.
-- `inc/` — пользовательские заголовки.
+- `src/` — пользовательский код приложения (пример на CMSIS).
+- `inc/` — пользовательские заголовки (`main.hpp` — закомментированные includes драйверов).
+- `Drivers/` — библиотека `STM32_Drivers_CPP`; клонируется при первой конфигурации, если `"drivers"` включены (в `.gitignore`).
+- `Bootloader/` — репозиторий загрузчика; клонируется, если в `project.json` задан `"bootloader"` (в `.gitignore`).
 - `no_system_files/` — `syscalls.c` и `sysmem.c` для newlib/newlib-nano.
 - `cmsis-core/` — локальная база CMSIS Core headers.
 - `cmsis-core/download_files/` — скачанные startup/device/linker/SVD-файлы под выбранный MCU.
@@ -42,7 +44,8 @@
    - шаблон linker script
 4. В `CMakeLists.txt` создаётся таргет `stm32_platform` — все флаги компилятора и линкера в одном месте.
 5. Если `"drivers"` не `null`/`false` — подключает `Drivers/` (первая конфигурация клонирует их).
-6. `stm32_add_firmware()` рендерит `.ld` под окно флеша образа и собирает `.elf/.hex/.bin/.dis`.
+6. Если задан `"bootloader"` — клонирует `Bootloader/` и собирает его первым образом `bootloader` в секторах `[0, N)`.
+7. `stm32_add_firmware()` рендерит `.ld` под окно флеша образа и собирает `.elf/.hex/.bin/.dis` (для приложения с загрузчиком — с сектора `N`).
 
 Драйверы генерируют `flash_config.h` / `irq_registry_config.h` сами (это их внутренние заголовки).
 
@@ -60,21 +63,15 @@
 
 ## Пример приложения
 
-Текущий `src/main.cpp` — минимальный пример прямой работы с регистрами:
+Текущий `src/main.cpp` — минимальный пример на чистом CMSIS (без драйверов, `"drivers": null`):
 
-- включает тактирование `GPIOB`;
-- переводит `PB7` в output;
-- бесконечно переключает `PB7` с программной задержкой.
+- включает тактирование `GPIOA` (`RCC->AHB1ENR`);
+- переводит `PA5` (светодиод Nucleo-F446RE) в output;
+- бесконечно переключает его с программной задержкой.
 
-То есть после успешной сборки и прошивки прошивка просто мигает выводом `PB7`.
+Пример написан под F4; на другом семействе замените включение тактирования порта. Заголовок чипа подключается как `#include STM32_DEVICE_HEADER` (define задаёт платформа).
 
-В коде также оставлены закомментированные примеры использования драйверов:
-
-- `System::Init()`
-- `ClockSystem::Init_calc_pll(...)`
-- `System::Enable_CYCCNT()`
-- `PIN::SetUp(...)`
-- `System::SWOTrace(...)`
+В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::Init_calc_pll(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
 
 ## Требования
 
@@ -105,11 +102,11 @@
 ```json
 {
   "name":         "firmware",
-  "version":      "3.1",
+  "version":      "3.2",
   "device":       "STM32F446RE",
   "heap":         "0x200",
   "stack":        "0x400",
-  "drivers":      ["UART", "SPI", "DMA", "TIM"],
+  "drivers":      null,
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -171,11 +168,14 @@ build/<preset>/
 
 Что уже настроено:
 
-- сборка через активный `CMake` preset;
-- прошивка через `STM32_Programmer_CLI.exe` по `SWD`;
+- сборка через активный `CMake` preset (`CMake: Build`);
+- прошивка активной цели CMake через `STM32_Programmer_CLI.exe` по `SWD` (`STM32Prog: Flash project (SWD)`);
+- прошивка загрузчика (`STM32Prog: Flash bootloader (SWD)`) и обоих образов подряд (`Build + Flash all`) — если в `project.json` задан `bootloader`;
 - полное стирание чипа;
-- запуск отладки через `cortex-debug` и `ST-Link`;
+- отладка через `cortex-debug`: `ST-Link Launch` / `ST-Link Attach` (штатный GDB-сервер ST-Link), `ST-Link-OCD` / `ST-Link-OCD-SWO` (OpenOCD, семейство выбирается при запуске; SWO — вывод трассировки), `VS_Launch` (расширение ST для VS Code);
 - использование локально скачанного `SVD` файла.
+
+Цель CMake (`cmake.launchTargetPath`) — тот образ, который шьётся и отлаживается: с загрузчиком целей две (`bootloader` и `firmware`), нужную выбирают в строке состояния CMake.
 
 Типичный сценарий в VS Code:
 
@@ -183,15 +183,24 @@ build/<preset>/
 2. Выбрать configure preset, например `debug`.
 3. Выполнить `CMake: Configure`.
 4. Выполнить `CMake: Build`.
-5. Запустить задачу `STM32Prog: Flash project (SWD)` или `Build + Flash`.
-6. Для отладки выбрать одну из конфигураций `ST-Link Launch` / `ST-Link Attach`.
+5. Запустить задачу `STM32Prog: Flash project (SWD)` или `Build + Flash` (с загрузчиком — `Build + Flash all`).
+6. Для отладки выбрать конфигурацию из `launch.json` (см. выше).
+
+Отладка приложения с загрузчиком: прошейте оба образа, выберите цель `firmware` и используйте `ST-Link Attach`. Запуск `ST-Link Launch` перепрошивает и сбрасывает ядро; приложение стартует только через загрузчик, который передаёт ему управление.
 
 ## Прошивка из командной строки
 
 Если `STM32_Programmer_CLI.exe` доступен в `PATH`, можно прошивать так:
 
 ```powershell
-STM32_Programmer_CLI.exe --connect port=swd --download build/debug/<project>.elf -hardRst --start
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/<project>.elf --start
+```
+
+С загрузчиком — сначала загрузчик, затем приложение (адреса зашиты в ELF):
+
+```powershell
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/bootloader.elf
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/<project>.elf --start
 ```
 
 Посмотреть доступные интерфейсы:
@@ -238,9 +247,10 @@ STM32_Programmer_CLI.exe --connect port=swd --erase all
 
 - Проект зависит от загрузки файлов из GitHub во время конфигурации. Без доступа к сети первая настройка не пройдёт, если нужных файлов ещё нет локально.
 - В `CMakeLists.txt` linker script берётся из `cmsis-core/download_files/linker/`, поэтому итоговая рабочая конфигурация должна находиться именно там.
-- Шаблон ориентирован на собственные драйверы автора, а не на HAL/LL.
+- Шаблон ориентирован на CMSIS и собственные драйверы автора, а не на HAL/LL.
+- Загрузчик пока каркас: проверка образа и прыжок в приложение реализованы, протокол обновления — нет (см. `stm32-bootloader`).
 - Драйверы пока поддерживают только F4 / F7 / G0. Для других семейств (G4 и т.д.) — `"drivers": null`.
-- Демо `src/main.cpp` написано под F4 (`RCC_AHB1ENR_GPIOBEN`); на других семействах его нужно заменить своим кодом.
+- Демо `src/main.cpp` написано под F4 (`RCC->AHB1ENR`, PA5); на других семействах его нужно заменить своим кодом.
 - В `main.cpp` сейчас используется прямой доступ к регистрам, поэтому начальная частота/инициализация зависят от reset state MCU.
 - Без пресета (`cmake -B ...` напрямую) оптимизации нет — используйте `cmake --preset ...`.
 
@@ -261,8 +271,8 @@ STM32_Programmer_CLI.exe --connect port=swd --erase all
 - `CMakeLists.txt` — как склеиваются конфиг, платформа, драйверы и образ.
 - `cmake/functions.cmake` — `stm32_read_config()`, `stm32_add_firmware()` и прочие функции.
 - `cmake/cmsis-download.cmake` — откуда берутся startup/header/linker-файлы.
-- `src/main.cpp` — минимальный пример.
-- `Drivers/src/*.hpp` — доступные драйверы и их API.
+- `src/main.cpp` — минимальный пример на CMSIS.
+- `Drivers/src/*.hpp` — доступные драйверы и их API (описание — `Drivers/ReadMe.md`).
 
 ## Итог
 

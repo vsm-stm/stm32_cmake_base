@@ -103,6 +103,26 @@
       "detail": "Perform full chip erase via SWD"
     },
 
+    // Загрузчик (если в project.json задан "bootloader"): второй образ
+    // build/<пресет>/bootloader.elf. Задача "Flash project" шьёт активную цель CMake
+    // (выберите bootloader или firmware); оба образа подряд — "Build + Flash all".
+    {
+      "type": "shell",
+      "label": "STM32Prog: Flash bootloader (SWD)",
+      "command": "STM32_Programmer_CLI.exe",
+      "args": [
+        "--connect",
+        "port=swd",
+        "--download",
+        "${workspaceFolder}/build/${command:cmake.activeConfigurePresetName}/bootloader.elf"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "detail": "Flash bootloader.elf (only when project.json has bootloader)"
+    },
+
     // ======================================================
     // Combined tasks
     // ======================================================
@@ -117,7 +137,21 @@
         "STM32Prog: Flash project (SWD)"
       ],
       "problemMatcher": [],
-      "detail": "Clean rebuild project and flash it to STM32"
+      "detail": "Build project and flash the active CMake launch target"
+    },
+
+    {
+      "type": "shell",
+      "label": "Build + Flash all (bootloader + app)",
+      "command": "echo Build and flash bootloader and application",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "CMake: Build",
+        "STM32Prog: Flash bootloader (SWD)",
+        "STM32Prog: Flash project (SWD)"
+      ],
+      "problemMatcher": [],
+      "detail": "Build, flash bootloader.elf, then the active launch target (select the application)"
     }
 
   ]

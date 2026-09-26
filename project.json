@@ -3,7 +3,7 @@
 
 	// имя проекта и версия (имя = имя целевого файла .elf)
 	"name":         "firmware",
-	"version":      "3.1",
+	"version":      "3.2",
 
 	// полный код чипа, напр. STM32F446RE, STM32F429ZI, STM32G474RE
 	"device":       "STM32f446ret",
