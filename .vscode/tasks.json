@@ -103,6 +103,16 @@
       "detail": "Perform full chip erase via SWD"
     },
 
+    {
+      "type": "shell",
+      "label": "STM32Prog: Reset target",
+      "command": "STM32_Programmer_CLI.exe",
+      "args": ["--connect", "port=swd", "-hardRst"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "detail": "Hardware reset of the target via SWD"
+    },
+
     // Загрузчик (если в project.json задан "bootloader"): второй образ
     // build/<пресет>/bootloader.elf. Задача "Flash project" шьёт активную цель CMake
     // (выберите bootloader или firmware); оба образа подряд — "Build + Flash all".

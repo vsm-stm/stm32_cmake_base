@@ -61,16 +61,22 @@ endfunction()
 #   CFG_drivers                         — список опциональных модулей
 #   CFG_app_start_sector                — "" или N; только для проекта-загрузчика
 #                                         (верхний ключ app_start_sector: образ [0, N))
-#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag}
+#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag,port_sources}
 #                                       — секция "bootloader" (см. ниже)
 #
 # "bootloader" в project.json приложения: null / нет ключа — без загрузчика,
 #   прошивка с начала флеша; объект {"app_start_sector": N, "repo": "<git url>",
-#   "tag": "<тег>"} — загрузчик в начале флеша, приложение — с сектора N
-#   (CFG_app_start_sector = N). Загрузчик подключается как драйверы: клонируется
-#   в Bootloader/, файлы берутся из его project.json, его CMakeLists.txt не
-#   используется. В project.json самого загрузчика тот же N задаётся верхним
-#   ключом "app_start_sector".
+#   "tag": "<тег>", "port_sources": [...]} — загрузчик в начале флеша, приложение
+#   — с сектора N (CFG_app_start_sector = N). Загрузчик подключается как
+#   драйверы: клонируется в Bootloader/, файлы берутся из его project.json, его
+#   CMakeLists.txt не используется. В project.json самого загрузчика тот же N
+#   задаётся верхним ключом "app_start_sector".
+#
+#   "port_sources" (необязательно) — файлы ЭТОГО проекта (пути от его
+#   project.json), которые добавляются к сборке образа загрузчика: так плата-
+#   специфичный порт (переопределяет слабые заглушки port_stub.c загрузчика)
+#   пишется в проекте, а репозиторий загрузчика остаётся общим и всегда тянется
+#   как есть, без правок под конкретную плату.
 #
 # "drivers" в project.json:
 #   нет ключа / null / false  -> драйверы не собираются вообще (CFG_use_drivers OFF)
@@ -158,6 +164,7 @@ function(stm32_read_config PATH PREFIX)
 	set(${PREFIX}_use_bootloader OFF PARENT_SCOPE)
 	set(${PREFIX}_bootloader_repo "" PARENT_SCOPE)
 	set(${PREFIX}_bootloader_tag  "" PARENT_SCOPE)
+	set(${PREFIX}_bootloader_port_sources "" PARENT_SCOPE)
 	string(JSON _bt ERROR_VARIABLE _e TYPE "${_cfg}" bootloader)
 	if(NOT _e AND _bt STREQUAL "OBJECT")
 		string(JSON _bs ERROR_VARIABLE _e GET "${_cfg}" bootloader app_start_sector)
@@ -176,6 +183,22 @@ function(stm32_read_config PATH PREFIX)
 		set(${PREFIX}_app_start_sector "${_bs}" PARENT_SCOPE)
 		set(${PREFIX}_bootloader_repo "${_br}" PARENT_SCOPE)
 		set(${PREFIX}_bootloader_tag  "${_bg}" PARENT_SCOPE)
+
+		# port_sources: свои файлы этого проекта (порт под конкретную плату — переопределяет
+		# слабые заглушки из port_stub.c), добавляются к сборке ОБРАЗА ЗАГРУЗЧИКА. Так
+		# репозиторий загрузчика остаётся общим и не знает про конкретные платы: он всегда
+		# тянется из репозитория как есть, а плата-специфичный код пишется поверх, в проекте.
+		set(_bps "")
+		string(JSON _bps_t ERROR_VARIABLE _e TYPE "${_cfg}" bootloader port_sources)
+		if(NOT _e AND _bps_t STREQUAL "ARRAY")
+			string(JSON _bps_n LENGTH "${_cfg}" bootloader port_sources)
+			math(EXPR _bps_last "${_bps_n} - 1")
+			foreach(_i RANGE ${_bps_last})
+				string(JSON _r GET "${_cfg}" bootloader port_sources ${_i})
+				list(APPEND _bps "${_root}/${_r}")
+			endforeach()
+		endif()
+		set(${PREFIX}_bootloader_port_sources "${_bps}" PARENT_SCOPE)
 	elseif(NOT _e AND NOT _bt STREQUAL "NULL")
 		message(FATAL_ERROR "project.json: \"bootloader\" должен быть объектом или null")
 	endif()

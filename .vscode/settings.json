@@ -19,34 +19,54 @@
 
   "VsCodeTaskButtons.tasks": [
     {
-      "label": "$(run) Run",
-      "task": "Build + Flash",
-      "tooltip": "Clean rebuild, flash to STM32 and start execution"
-    },
-    {
-      "label": "$(debug-restart-frame) CMake: Clean rebuild",
-      "task": "CMake: Clean rebuild",
-      "tooltip": "Clean and rebuild project using CMake"
-    },
-    {
-      "label": "$(desktop-download) STM32Prog: Flash",
-      "task": "STM32Prog: Flash project (SWD)",
-      "tooltip": "Flash current ELF to STM32 via SWD"
-    },
-    {
-      "label": "$(close) STM32Prog: Full erase",
-      "task": "STM32Prog: Full chip erase",
-      "tooltip": "Perform full chip erase via SWD"
-    },
-    {
-      "label": "$(list) STM32Prog: List",
-      "task": "STM32Prog: List interfaces",
-      "tooltip": "List available STM32 programmer interfaces"
-    },
-    {
-      "label": "$(output) CMake: Configure",
+      "label": "$(gear) Configure",
       "task": "CMake: Configure",
-      "tooltip": "Run CMake configure using active preset"
+      "tooltip": "CMake configure с активным пресетом"
+    },
+    {
+      "label": "$(tools) Build",
+      "task": "CMake: Build",
+      "tooltip": "Собрать проект (активный пресет)"
+    },
+    {
+      "label": "$(debug-restart-frame) Rebuild",
+      "task": "CMake: Clean rebuild",
+      "tooltip": "Чистая пересборка"
+    },
+    {
+      "label": "$(run) Build+Flash",
+      "task": "Build + Flash",
+      "tooltip": "Собрать, прошить активную цель CMake и запустить"
+    },
+    {
+      "label": "$(run-all) Flash all",
+      "task": "Build + Flash all (bootloader + app)",
+      "tooltip": "С загрузчиком: собрать, прошить bootloader.elf и активную цель (выберите приложение)"
+    },
+    {
+      "label": "$(chip) Flash BL",
+      "task": "STM32Prog: Flash bootloader (SWD)",
+      "tooltip": "Прошить только bootloader.elf"
+    },
+    {
+      "label": "$(desktop-download) Flash",
+      "task": "STM32Prog: Flash project (SWD)",
+      "tooltip": "Прошить активную цель CMake по SWD (без сборки)"
+    },
+    {
+      "label": "$(refresh) Reset",
+      "task": "STM32Prog: Reset target",
+      "tooltip": "Аппаратный сброс МК"
+    },
+    {
+      "label": "$(close) Erase",
+      "task": "STM32Prog: Full chip erase",
+      "tooltip": "Полное стирание чипа по SWD"
+    },
+    {
+      "label": "$(list) Probes",
+      "task": "STM32Prog: List interfaces",
+      "tooltip": "Список подключённых программаторов"
     }
   ],
 

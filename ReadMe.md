@@ -175,6 +175,8 @@ build/<preset>/
 - отладка через `cortex-debug`: `ST-Link Launch` / `ST-Link Attach` (штатный GDB-сервер ST-Link), `ST-Link-OCD` / `ST-Link-OCD-SWO` (OpenOCD, семейство выбирается при запуске; SWO — вывод трассировки), `VS_Launch` (расширение ST для VS Code);
 - использование локально скачанного `SVD` файла.
 
+Кнопки в строке состояния (расширение «Task Buttons», `VsCodeTaskButtons.tasks` в `settings.json`) дублируют задачи, так что командная строка не нужна: `Configure`, `Build`, `Rebuild`, `Build+Flash`, `Flash all` (загрузчик + приложение), `Flash BL`, `Flash`, `Reset`, `Erase`, `Probes`.
+
 Цель CMake (`cmake.launchTargetPath`) — тот образ, который шьётся и отлаживается: с загрузчиком целей две (`bootloader` и `firmware`), нужную выбирают в строке состояния CMake.
 
 Типичный сценарий в VS Code:

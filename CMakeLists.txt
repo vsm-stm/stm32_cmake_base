@@ -92,31 +92,34 @@ endif()
 # ─── загрузчик (как драйверы) ────────────────────────────────────────────────
 #     "bootloader" в project.json: нет / null — без загрузчика, прошивка с начала
 #     флеша; {"app_start_sector": N, "repo": ..., "tag": ...} — загрузчик в начале
-#     флеша, секторы [0, N), приложение — с сектора N. 1-я конфигурация клонирует
-#     репозиторий в Bootloader/, дальше используется локальная копия. Его
-#     CMakeLists.txt НЕ используется: список файлов берётся из его project.json
+#     флеша, секторы [0, N), приложение — с сектора N. Всегда тянется из репозитория
+#     (git) в Bootloader/ — правки под конкретный проект сюда не вносятся, они идут
+#     через "bootloader"."port_sources" (см. ниже). Для локальной разработки самого
+#     загрузчика — обычный FetchContent-оверрайд:
+#       -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=<путь к рабочей копии stm32-bootloader>
+#     Его CMakeLists.txt НЕ используется: список файлов берётся из его project.json
 #     (тем же stm32_read_config), сборкой управляет этот файл.
 if(CFG_use_bootloader)
-	if(NOT EXISTS "${CMAKE_SOURCE_DIR}/Bootloader/project.json")
-		message(STATUS "Bootloader: cloning ${CFG_bootloader_repo} (${CFG_bootloader_tag}) into Bootloader/ ...")
-		include(FetchContent)
-		FetchContent_Declare(Bootloader
-			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Bootloader
-			GIT_REPOSITORY ${CFG_bootloader_repo}
-			GIT_TAG        ${CFG_bootloader_tag}
-			GIT_SHALLOW    TRUE
-			SOURCE_SUBDIR  _no_cmake_here_)   # только клонируем, его CMakeLists не запускаем
-		FetchContent_MakeAvailable(Bootloader)
-	else()
-		message(STATUS "Bootloader: Bootloader/ (in-tree)")
-	endif()
+	include(FetchContent)
+	FetchContent_Declare(bootloader
+		SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Bootloader
+		GIT_REPOSITORY ${CFG_bootloader_repo}
+		GIT_TAG        ${CFG_bootloader_tag}
+		GIT_SHALLOW    TRUE
+		SOURCE_SUBDIR  _no_cmake_here_)   # только клонируем, его CMakeLists не запускаем
+	FetchContent_MakeAvailable(bootloader)
+	message(STATUS "Bootloader: ${bootloader_SOURCE_DIR}")
 
-	# тот же формат project.json, пути — относительно Bootloader/
-	stm32_read_config("${CMAKE_SOURCE_DIR}/Bootloader/project.json" BL)
+	# читаем project.json из ФАКТИЧЕСКОГО каталога (обычно Bootloader/; при
+	# FETCHCONTENT_SOURCE_DIR_BOOTLOADER — путь оверрайда, без клонирования)
+	stm32_read_config("${bootloader_SOURCE_DIR}/project.json" BL)
 	set(_bl_sources ${BL_sources})
 	if(CFG_use_drivers)
 		list(APPEND _bl_sources ${BL_driver_sources})
 	endif()
+	# port_sources из "bootloader" в project.json ЭТОГО проекта: плата-специфичный
+	# порт поверх репозитория загрузчика (переопределяет его слабые заглушки)
+	list(APPEND _bl_sources ${CFG_bootloader_port_sources})
 	stm32_add_firmware(bootloader
 		SOURCES       ${_bl_sources}
 		INCLUDE_DIRS  ${BL_include_dirs}
