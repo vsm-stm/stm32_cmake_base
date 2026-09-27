@@ -1,25 +1,69 @@
-include(FetchContent)
-include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
+# ============================================================================
+# cmsis-download.cmake — скачать файлы под чип и разобрать его параметры
+# ============================================================================
+# Процедурный файл, include()-ится из CMakeLists.txt после project(). По
+# CFG_device (из project.json):
+#
+#   1. разбирает имя устройства на семейство/модель/букву размера флеша,
+#   2. ловит смену чипа между реконфигурациями и, если она была, стирает
+#      устаревшие скачанные файлы и build-каталог,
+#   3. скачивает (или переиспользует уже лежащие) заголовки CMSIS, стартовый
+#      код, таблицу векторов и SVD из STM32-base_files,
+#   4. выбирает шаблон линкер-скрипта для этого семейства.
+#
+# Флаги компилятора/линкера (таргет stm32_platform) и подключение драйверов —
+# НЕ здесь, а в CMakeLists.txt: этот файл только достаёт файлы и факты.
+#
+# Выход наружу (читают CMakeLists.txt, stm32_add_firmware(), Drivers/CMakeLists):
+#   main_cpu_PARAMS  c_target  STM32_DEVICE_UC  STM32_CORE  STM32_FLASH
+#   STM32_RAM  STM32_EXTRA  STM32_SERIES_UC  STM32_NAME  STM32_VECTOR_FILE
+#   STM32_LINKER_TEMPLATE  STM32_STARTUP_SRCS  STM32_FLASH_SECTORS
+#   HEAP_SIZE  STACK_SIZE  RAM_ORIGIN  RAM_LENGTH  (+ переменные MEMORY семейства)
+#
+# functions.cmake должен быть include()-нут раньше (это делает CMakeLists.txt).
+# Всё скачанное ложится в cmsis-core/download_files/ и коммитится после первой
+# загрузки; download_one() делает шаг 3 no-op на последующих конфигурациях.
+# ============================================================================
 
-string(SUBSTRING "${DEVICE}" 0 11 DEVICE)
+# ============================================================================
+# 1. Разбор имени устройства
+# ============================================================================
+# Партномера STM32 устроены так: STM32 <семейство:2> <тип:2-3> <корпус:1>
+# <флеш:1> ...  напр. STM32F446RE = STM32 | F4 | 46 | R (корпус) | E (код
+# размера флеша). Нам всегда нужны только три среза:
+#   STM32_CORE      = первые 7 символов = "STM32F4"    (семейство: напр.
+#                                                        выбирает какой
+#                                                        -map.cmake/каталог
+#                                                        векторов брать)
+#   STM32_MODEL_UC  = первые 9 символов = "STM32F446"  (семейство + тип, по
+#                                                        нему ищем точную
+#                                                        строку чипа в map)
+#   last_letter     = 10-й символ       = "E"          (буква кода флеша, идёт
+#                                                        в имя линкер-скрипта:
+#                                                        STM32F446xE.ld)
+# Это позиционная нарезка строки, а не настоящий парсер — предполагается что
+# CFG_device всегда 11-символьный партномер ровно этой грамматики (семейство+
+# тип+корпус+буква флеша). Имя короче/длиннее или не по грамматике (напр.
+# деталь без буквы корпуса) нарежется неправильно без ошибки — сверки со
+# схемой именования STM32 тут нет, есть только проверка что нарезанное имя
+# есть в map-таблице семейства ниже.
+string(SUBSTRING "${CFG_device}" 0 11 STM32_DEVICE)
 
-
-string(TOLOWER ${DEVICE} STM32_DEVICE_LC)
-string(TOUPPER ${DEVICE} STM32_DEVICE_UC)
+string(TOLOWER ${STM32_DEVICE} STM32_DEVICE_LC)
+string(TOUPPER ${STM32_DEVICE} STM32_DEVICE_UC)
 message(STATUS "Device_LC: " ${STM32_DEVICE_LC})
 message(STATUS "Device_UC: " ${STM32_DEVICE_UC})
-#string(TOLOWER ${DEVICE} ${DEVICE})
 
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 7 STM32_CORE)
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 11 STM32_FLASH_def) # todo
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 9 STM32_MODEL_UC)
-string(SUBSTRING "${STM32_DEVICE_UC}" 10 1 last_letter)
+string(SUBSTRING "${STM32_DEVICE_UC}" 10 1 last_letter)     # буква кода флеша
 
 set(STM32_SERIES_UC "${STM32_CORE}xx")
-set(linker_name "${STM32_MODEL_UC}x${last_letter}.ld") 
+set(linker_name "${STM32_MODEL_UC}x${last_letter}.ld")
 string(TOLOWER ${STM32_MODEL_UC} STM32_MODEL_LC)
 string(TOLOWER ${STM32_SERIES_UC} STM32_SERIES_LC)
-set(c_target "${STM32_MODEL_UC}xx") # todo choose base on STM32_CORE
+set(c_target "${STM32_MODEL_UC}xx") # todo: выбирать на основе STM32_CORE
 
 message(STATUS "STM32_CORE: 	 " ${STM32_CORE})
 message(STATUS "STM32_FLASH_def:" ${STM32_FLASH_def})
@@ -31,57 +75,23 @@ message(STATUS "linker_name: " ${linker_name}) # todo
 message(STATUS "last_letter: " ${last_letter}) # todo
 message(STATUS "c_target: " ${c_target})
 
-# ==========================================
-# STM32 device consistency check
-# ==========================================
+# ============================================================================
+# 2. Смена устройства
+# ============================================================================
+# Скачанное под другой чип (или без маркера) стирается, маркер обновляется —
+# вся логика в stm32_sync_device() (functions.cmake).
+stm32_sync_device("${STM32_DEVICE}")
 
-if(NOT DEFINED STM32_CONFIGURED_DEVICE)
-  # First configuration
-  message(STATUS
-    "Initial STM32 configuration for device: ${DEVICE}"
-  )
+# ============================================================================
+# 3. Загрузка CMSIS / startup / векторов / SVD для этого устройства
+# ============================================================================
+# Каждый download_one() ниже — no-op, как только файл уже лежит рядом
+# (см. functions.cmake) — реальная работа с сетью в этой секции только на
+# первой конфигурации для данного DEVICE.
 
-  set(STM32_CONFIGURED_DEVICE
-      "${DEVICE}"
-      CACHE STRING
-      "STM32 device this build directory was configured for"
-  )
-
-else()
-	# Reconfiguration
-	if(NOT STM32_CONFIGURED_DEVICE STREQUAL DEVICE)
-		message(WARNING
-		"STM32 device changed:\n"
-		"  old: ${STM32_CONFIGURED_DEVICE}\n"
-		"  new: ${DEVICE}\n"
-		"Cleaning downloaded STM32 files."
-		)
-
-		file(REMOVE_RECURSE
-		${CMAKE_SOURCE_DIR}/cmsis-core/download_files
-		)
-
-		# Clean build artifacts
-		stm32_clean_build_dir()
-
-		set(STM32_CONFIGURED_DEVICE
-			"${DEVICE}"
-			CACHE STRING
-			"STM32 device this build directory was configured for"
-			FORCE
-		)
-	else()
-		message(STATUS
-		"STM32 device unchanged: ${DEVICE}"
-		)
-	endif()
-endif()
-
-
-
-# ============================================================================================================================================
-# get name for vector table and header file
-# ============================================================================================================================================
+# ----------------------------------------------------------------------------
+# получаем имя для таблицы векторов и файла заголовка
+# ----------------------------------------------------------------------------
 download_one(
 	"STM32-map.cmake"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake"
@@ -89,7 +99,7 @@ download_one(
 
 include(${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/STM32-map.cmake)
 # ============================
-# lookup name
+# поиск имени
 # ============================
 list(FIND ${STM32_CORE}_MAP "${STM32_DEVICE_UC}" IDX)
 
@@ -109,18 +119,32 @@ list(GET ${STM32_CORE}_MAP ${IDX_EXTRA} STM32_EXTRA)
 
 message(STATUS "STM32_NAME   = ${STM32_NAME}")
 
-# ============================================================================================================================================
-# download svd from series and model - STM32F4/STM32F4xx.svd
-# ============================================================================================================================================
+# Раскладка секторов стирания под этот конкретный объём флеша — готовый
+# список "addr;size;...", дописанный в тот же map-файл скриптом
+# STM32-base_files/flash_sectors.py. Его читают stm32_flash_window()
+# (functions.cmake) и stm32_add_firmware() (там же); а также
+# flash_config.h драйверов.
+set(STM32_FLASH_SECTORS "${${STM32_CORE}_SECTORS_${STM32_FLASH}}")
+if(NOT STM32_FLASH_SECTORS)
+	message(FATAL_ERROR
+		"cmsis-download: ${STM32_CORE}_SECTORS_${STM32_FLASH} not found for "
+		"${STM32_DEVICE_UC} (${STM32_FLASH}). Regenerate the map tables with "
+		"STM32-base_files/flash_sectors.py.")
+endif()
+
+# ----------------------------------------------------------------------------
+# скачиваем SVD по серии и модели — STM32F4/STM32F4xx.svd
+# ----------------------------------------------------------------------------
 
 download_one(
 	"SVD.svd"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files"
-	"SVD/${STM32_SERIES_UC}/${STM32_MODEL_UC}.svd")
+	"SVD/${STM32_SERIES_UC}/${STM32_MODEL_UC}.svd"
+	OPTIONAL)   # SVD нужен только отладчику; нет файла — не ошибка
 
-# ============================================================================================================================================
-# download startup and vetor files
-# ============================================================================================================================================
+# ----------------------------------------------------------------------------
+# скачиваем startup и файлы векторов
+# ----------------------------------------------------------------------------
 
 download_one(
 	"startup_common.c"
@@ -132,20 +156,25 @@ download_one(
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup"
 	"startup_c/${STM32_SERIES_UC}/vector_${STM32_NAME}.c")
 
-download_one(
-	"irq_registry_config.h.in"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/"
-	"cmake/irq_registry_config.h.in"
+# Путь к скачанной таблице векторов — исполняемый файл компилирует её (это
+# настоящий .isr_vector), а STM32_Drivers_CPP парсит её текстом, чтобы
+# сгенерировать свои IRQ-заглушки.
+set(STM32_VECTOR_FILE "${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c")
+
+# Обязательная обвязка, которую линкует любой образ прошивки, той же категории
+# что и линкер-скрипт — таблица векторов + общий startup, плюс newlib-заглушки
+# ретаргета (sysmem.c = _sbrk/heap, syscalls.c = _write/_read/...).
+# stm32_add_firmware() добавляет это в каждую собираемую цель.
+set(STM32_STARTUP_SRCS
+	${STM32_VECTOR_FILE}
+	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/startup_common.c
+	${CMAKE_SOURCE_DIR}/no_system_files/sysmem.c
+	${CMAKE_SOURCE_DIR}/no_system_files/syscalls.c
 )
 
-stm32_generate_irq_handlers(
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/startup/vector_${STM32_NAME}.c"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/irq_registry_config.h.in"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/irq_registry_config.h"
-)
-# ============================================================================================================================================
-# download STM32 headers files and system files
-# ============================================================================================================================================
+# ----------------------------------------------------------------------------
+# скачиваем заголовки STM32 и системные файлы
+# ----------------------------------------------------------------------------
 
 download_one(
 	"${STM32_SERIES_LC}.h"
@@ -167,29 +196,28 @@ download_one(
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include"
 	"Device/${STM32_SERIES_UC}/Include/${STM32_NAME}.h")
 
-# ============================================================================================================================================
-# Configure and download linker files
-# ============================================================================================================================================
+# ============================================================================
+# 4. Линкер-скрипт: выбираем шаблон под семейство (рендер — в stm32_add_firmware)
+# ============================================================================
+# FLASH_ORIGIN / FLASH_LENGTH здесь НЕ задаются — они зависят от стартового
+# сектора линкуемого образа (загрузчик или приложение), поэтому
+# stm32_add_firmware() разрешает их для каждой цели и там же рендерит
+# линкер-скрипт.
 
-message(STATUS "Using linker script : ${LD_TEMPLATE}")
-message(STATUS "FLASH               : ${STM32_FLASH}")
-message(STATUS "RAM                 : ${STM32_RAM}")
-message(STATUS "EXTRA               : ${STM32_EXTRA}")
-
-set(FLASH_ORIGIN 0x08000000)
-set(FLASH_LENGTH ${STM32_FLASH})
+message(STATUS "FLASH : ${STM32_FLASH}   RAM : ${STM32_RAM}   EXTRA : ${STM32_EXTRA}")
 
 set(RAM_ORIGIN 0x20000000)
 set(RAM_LENGTH ${STM32_RAM})
 
-if(NOT DEFINED HEAP_SIZE)
-	set(HEAP_SIZE 0x200)
-endif()
-if(NOT DEFINED STACK_SIZE)
-	set(STACK_SIZE 0x400)
-endif()
+# heap/stack приходят из project.json (stm32_read_config подставил умолчания)
+set(HEAP_SIZE  ${CFG_heap})
+set(STACK_SIZE ${CFG_stack})
 
-
+# Каждому семейству ниже нужна своя раскладка MEMORY{}, потому что
+# дополнительная область RAM (или её отсутствие) у всех разная: F7 делит RAM
+# на ITCM/DTCM/SRAM1/SRAM2, у H7 своя (пока не реализовано — см. TODO ниже),
+# всё с ненулевым STM32_EXTRA получает пристроенную область CCM, остальное —
+# простой чип FLASH+RAM.
 if(STM32_CORE STREQUAL "STM32F7")
 	set(LD_TEMPLATE "linker-f7.ld.in")
 
@@ -199,31 +227,43 @@ if(STM32_CORE STREQUAL "STM32F7")
 	set(DTCM_ORIGIN 0x20000000)
 	set(DTCM_LENGTH ${STM32_EXTRA})   # 64K или 128K
 
-	set(SRAM2_LENGTH 16K)
-
-	if(STM32_EXTRA STREQUAL "64K")
-		set(SRAM2_ORIGIN 0x2004C000)
-
-		set(SRAM1_ORIGIN 0x20010000)
-	elseif(STM32_EXTRA STREQUAL "128K")
-		set(SRAM2_ORIGIN 0x2007C000)
-
-		set(SRAM1_ORIGIN 0x20020000)
-	else()
+	if(NOT STM32_EXTRA STREQUAL "64K" AND NOT STM32_EXTRA STREQUAL "128K")
 		message(FATAL_ERROR "Invalid DTCM size for F7: ${STM32_EXTRA}")
 	endif()
 
-	k_to_int("${STM32_RAM}"   RAM_K)
-	k_to_int("${DTCM_LENGTH}" DTCM_K)
-	k_to_int("${SRAM2_LENGTH}" SRAM2_K)
+	# Расположение SRAM1 / SRAM2 берём из CMSIS-заголовка самого ST: SRAM1_BASE /
+	# SRAM2_BASE и размер SRAM2 в его комментарии. У F72x/F73x, F74x/F75x и
+	# F76x/F77x они разные (SRAM2 стоит по 0x2003C000 / 0x2004C000 / 0x2007C000),
+	# жёстко зашитые адреса подходили только одной из групп.
+	set(_f7_hdr "${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/${STM32_NAME}.h")
+	file(STRINGS "${_f7_hdr}" _f7_sram REGEX "^#define[ \t]+SRAM[12]_BASE[ \t]")
+	set(SRAM1_ORIGIN "")
+	set(SRAM2_ORIGIN "")
+	set(SRAM2_LENGTH 16K)
+	foreach(_l ${_f7_sram})
+		if(_l MATCHES "SRAM1_BASE[ \t]+(0x[0-9A-Fa-f]+)")
+			set(SRAM1_ORIGIN "${CMAKE_MATCH_1}")
+		elseif(_l MATCHES "SRAM2_BASE[ \t]+(0x[0-9A-Fa-f]+)")
+			set(SRAM2_ORIGIN "${CMAKE_MATCH_1}")
+			if(_l MATCHES "([0-9]+)[ \t]*KB[ \t]+RAM2")
+				set(SRAM2_LENGTH "${CMAKE_MATCH_1}K")
+			endif()
+		endif()
+	endforeach()
+	if(SRAM1_ORIGIN STREQUAL "" OR SRAM2_ORIGIN STREQUAL "")
+		message(FATAL_ERROR
+			"F7: в ${_f7_hdr} не найдены SRAM1_BASE / SRAM2_BASE (нужны для карты памяти)")
+	endif()
 
-	math(EXPR SRAM1_K
-		"${RAM_K} - ${DTCM_K} - ${SRAM2_K}"
-	)
-
+	# SRAM1 идёт до начала SRAM2
+	math(EXPR SRAM1_K "(${SRAM2_ORIGIN} - ${SRAM1_ORIGIN}) / 1024")
 	set(SRAM1_LENGTH "${SRAM1_K}K")
 
 elseif(STM32_CORE STREQUAL "STM32H7")
+	# TODO: в STM32-base_files/linker/ ещё нет linker-h7.ld.in (есть только
+	# linker-simple/-f7/-ccm) — выбор H7-устройства упадёт ниже на
+	# download_one("linker-h7.ld.in", ...) с 404, а не с внятной ошибкой
+	# "H7 не поддерживается". Исправить в upstream до заявления поддержки H7.
 	set(LD_TEMPLATE "linker-h7.ld.in")
 elseif(STM32_EXTRA AND NOT STM32_EXTRA STREQUAL "-" AND NOT STM32_EXTRA STREQUAL "0K")
 	set(LD_TEMPLATE "linker-ccm.ld.in")
@@ -244,89 +284,22 @@ else()
 endif()
 
 
+message(STATUS "Linker template : ${LD_TEMPLATE}")
+
 download_one(
 	"${LD_TEMPLATE}"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker"
 	"linker/${LD_TEMPLATE}")
 
-set(LD_IN  ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${LD_TEMPLATE})
-set(LD_OUT ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${STM32_DEVICE_LC}.ld)
-
-configure_file(
-  ${LD_IN}
-  ${LD_OUT}
-  @ONLY
-)
+# Только шаблон — stm32_add_firmware() рендерит его для каждой цели (каждый
+# образ задаёт свои FLASH_ORIGIN / FLASH_LENGTH от своего стартового сектора).
+set(STM32_LINKER_TEMPLATE  ${CMAKE_SOURCE_DIR}/cmsis-core/download_files/linker/${LD_TEMPLATE})
 
 
-message(STATUS "Linker script generated: ${LD_OUT}")
-
-# ============================================================================================================================================
-# Generate flash sector map header
-# ============================================================================================================================================
-
-# Families with single/dual variants: F4, F7, G4, H7
-# Families with xl variant:           F1 (XL-density, >512K)
-# All others:                         one template, no suffix
-set(_dual_families STM32F4 STM32F7 STM32G4 STM32H7)
-list(FIND _dual_families "${STM32_CORE}" _dual_idx)
-
-k_to_int("${STM32_FLASH}" _flash_kb)
-
-if(_dual_idx GREATER_EQUAL 0)
-	if(STM32_DUAL_BANK)
-		set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config_dual.h.in")
-	else()
-		set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config_single.h.in")
-	endif()
-elseif(STM32_CORE STREQUAL "STM32F1" AND _flash_kb GREATER 512)
-	set(FLASH_TEMPLATE_NAME "STM32F1_flash_config_xl.h.in")
-else()
-	set(FLASH_TEMPLATE_NAME "${STM32_CORE}_flash_config.h.in")
-endif()
-
-download_one(
-	"${FLASH_TEMPLATE_NAME}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake"
-	"cmake/${FLASH_TEMPLATE_NAME}")
-
-stm32_generate_flash_config(
-	"${STM32_CORE}"
-	"${STM32_FLASH}"
-	"${STM32_DEVICE_UC}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/cmake/${FLASH_TEMPLATE_NAME}"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/flash_config.h"
-)
-
-# ============================================================================================================================================
-# Download drivers (optional)
-# ============================================================================================================================================
-
-message(STATUS "USE_DRIVERS = ${USE_DRIVERS}")
-
-if(USE_DRIVERS)
-
-	if(NOT EXISTS "${CMAKE_SOURCE_DIR}/Drivers/ReadMe.md") # todo
-		message(STATUS "Drivers not found, downloading...")
-
-		include(FetchContent)
-
-		FetchContent_Declare(
-		Drivers
-		SOURCE_DIR    ${CMAKE_SOURCE_DIR}/Drivers
-		GIT_REPOSITORY git@github.com:varvar6666/STM32_Drivers_CPP.git
-		GIT_TAG        main
-		)
-
-		FetchContent_MakeAvailable(Drivers)
-
-	else()
-		message(STATUS "Drivers already present")
-	endif()
-
-else()
-	file(REMOVE_RECURSE
-		${CMAKE_SOURCE_DIR}/Drivers
-	)
-
-endif()
+# flash_config.h (карта секторов) и irq_registry_config.h (заглушки диспетчера
+# IRQ) здесь НЕ генерируются — оба нужны только STM32_Drivers_CPP
+# (irq_registry_config.h вообще не компилируется без него), поэтому CMakeLists
+# драйверов генерирует их сам из фактов о чипе, которые открывает этот файл
+# (STM32_CORE / STM32_FLASH / STM32_SERIES_UC / STM32_NAME / STM32_VECTOR_FILE
+# / STM32_FLASH_SECTORS). Таргет stm32_platform и подключение драйверов — в
+# главном CMakeLists.txt.

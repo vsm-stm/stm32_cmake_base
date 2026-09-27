@@ -4,7 +4,6 @@
 	{
 		"cwd": "${workspaceFolder}",
 		"executable": "${command:cmake.launchTargetPath}",
-		"device" : "${dev}",//"STM32F446RE",
 		"name": "ST-Link Launch",
 		// "serialNumber": "066CFF575383564867215114",
 		"request": "launch",
@@ -18,13 +17,11 @@
 		},
 		"preLaunchTask": "CMake: Build",
 		"preRestartCommands" : [ "load", "enable breakpoint", "monitor reset" ],
-		// "svdPath": "${command:vscode-embedded.st.svd}/STM32F446.svd"
 		"svdPath": "${workspaceFolder}/cmsis-core/download_files/SVD.svd"
 	},
 	{
 		"cwd": "${workspaceFolder}",
 		"executable": "${command:cmake.launchTargetPath}",
-		"device" : "STM32F446RE",
 		"name": "ST-Link Attach",
 		// "serialNumber": "066CFF575383564867215114",
 		"request": "attach",
@@ -37,13 +34,11 @@
 			"samplesPerSecond": 10
 		},
 		"preRestartCommands" : [ "load", "enable breakpoint", "monitor reset" ],
-		// "svdPath": "${command:vscode-embedded.st.svd}/STM32F446.svd"
 		"svdPath": "${workspaceFolder}/cmsis-core/download_files/SVD.svd"
 	},
 	{
 		"cwd": "${workspaceFolder}",
 		"executable": "${command:cmake.launchTargetPath}",
-		"device" : "STM32F446RE",
 		"name": "ST-Link-OCD",
 		// "serialNumber": "066CFF575383564867215114",
 		"request": "launch",
@@ -56,18 +51,17 @@
 			"enabled": true,
 			"samplesPerSecond": 10
 		},
-		"preLaunchTask": "Build",
+		"preLaunchTask": "CMake: Build",
 		"preRestartCommands" : [ "load", "enable breakpoint", "monitor reset" ],
-		"svdPath": "${command:vscode-embedded.st.svd}/STM32F446.svd",
+		"svdPath": "${workspaceFolder}/cmsis-core/download_files/SVD.svd",
 		"configFiles": [
-			"C:/openocd/share/openocd/scripts/interface/stlink-v2-1.cfg",
-			"C:/openocd/share/openocd/scripts/target/stm32f4x.cfg"
+			"interface/stlink.cfg",
+			"target/${input:openocdTarget}.cfg"
 		],
 	},
 	{
 		"cwd": "${workspaceFolder}",
 		"executable": "${command:cmake.launchTargetPath}",
-		"device" : "STM32F446RE",
 		"name": "ST-Link-OCD-SWO",
 		// "serialNumber": "066CFF575383564867215114",
 		"request": "launch",
@@ -80,17 +74,22 @@
 			"enabled": true,
 			"samplesPerSecond": 10
 		},
-		"preLaunchTask": "Build",
+		"preLaunchTask": "CMake: Build",
 		"preRestartCommands" : [ "load", "enable breakpoint", "monitor reset" ],
-		"svdPath": "${command:vscode-embedded.st.svd}/STM32F446.svd",
+		"svdPath": "${workspaceFolder}/cmsis-core/download_files/SVD.svd",
 		"configFiles": [
-			"C:/openocd/share/openocd/scripts/interface/stlink-v2-1.cfg",
-			"C:/openocd/share/openocd/scripts/target/stm32f4x.cfg"
+			"interface/stlink.cfg",
+			"target/${input:openocdTarget}.cfg"
 		],
 		"swoConfig": {
 			"enabled": true,
 			"source": "probe",
 			"swoFrequency": 2000000,
+			// cpuFrequency — тактовая частота ядра (SYSCLK/HCLK) в Гц, а не имя чипа.
+			// Должна совпадать с тем, что реально выставляет прошивка (ClockSystem::Init...):
+			// 16000000 — это HSI по умолчанию после сброса; после настройки PLL укажите
+			// свою частоту (напр. 180000000). При несовпадении SWO-вывод будет мусором.
+			// swoFrequency — скорость SWO-линии, тоже подбирается под связку зонд/чип.
 			"cpuFrequency": 16000000,
 			"decoders": [
 				{
@@ -117,14 +116,24 @@
 		"stopAtConnect": true,
 		"postRemoteConnectCommands": [
 		  {
-			"text": "load build/program.elf"
+			"text": "load ${command:cmake.launchTargetPath}"
 		  }
 		],
 		"logging": {
 		  "engineLogging": true
 		},
-		"preLaunchTask": "Build",
-		"svdPath": "${command:vscode-embedded.st.svd}/STM32F446.svd"
+		"preLaunchTask": "CMake: Build",
+		"svdPath": "${workspaceFolder}/cmsis-core/download_files/SVD.svd"
 	  }
+  ],
+  "inputs": [
+    {
+      // семейство чипа для OpenOCD (файл target/<...>.cfg); имя чипа в launch.json не зашито
+      "id": "openocdTarget",
+      "type": "pickString",
+      "description": "OpenOCD target для вашего чипа",
+      "options": ["stm32f0x", "stm32f1x", "stm32f2x", "stm32f3x", "stm32f4x", "stm32f7x", "stm32g0x", "stm32g4x", "stm32h7x", "stm32l0", "stm32l1"],
+      "default": "stm32f4x"
+    }
   ]
 }

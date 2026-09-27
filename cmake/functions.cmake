@@ -1,10 +1,242 @@
-function(download_one FILE_NAME BASE_DIR URL_DIR )
+# ============================================================================
+# functions.cmake — все функции платформы, только определения, 0 side-effects
+# ============================================================================
+# include()-ится первым из CMakeLists.txt. Ничего не делает при подключении —
+# просто объявляет функции (в CMake они глобальны сразу после определения, так
+# что видны и из cmsis-download.cmake, и из STM32_Drivers_CPP/CMakeLists.txt).
+#
+#   stm32_read_config()      — project.json -> переменные CFG_* (до project())
+#   stm32_add_firmware()     — собрать один прошиваемый образ
+#   download_one()           — тянет один файл из STM32-base_files, пропускает
+#                              если он уже лежит рядом
+#   stm32_flash_window()     — сектора [START, END) -> адрес начала + длина в байтах
+#   k_to_int()               — "128K" -> 128
+#   stm32_sync_device()      — смена чипа: стереть чужие скачанные файлы + build,
+#                              записать маркер .device
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# _stm32_json_array(CFG KEY OUT)   — внутренняя: JSON-массив CFG[KEY] -> список
+#   Отсутствие ключа / не-массив / пустой массив -> пустой список.
+# ---------------------------------------------------------------------------
+function(_stm32_json_array CFG KEY OUT)
+	set(_list "")
+	string(JSON _n ERROR_VARIABLE _e LENGTH "${CFG}" ${KEY})
+	if(NOT _e AND _n GREATER 0)
+		math(EXPR _last "${_n} - 1")
+		foreach(_i RANGE ${_last})
+			string(JSON _item GET "${CFG}" ${KEY} ${_i})
+			list(APPEND _list "${_item}")
+		endforeach()
+	endif()
+	set(${OUT} "${_list}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# _stm32_load_json(PATH OUT)   — внутренняя: файл -> строка JSON для string(JSON)
+#   Строки-комментарии (первый непробельный символ — //) вырезаются: string(JSON)
+#   понимает только строгий JSON. Хвостовые комментарии после значения не
+#   поддерживаются, а // внутри строковых значений (URL) не затрагивается.
+# ---------------------------------------------------------------------------
+function(_stm32_load_json PATH OUT)
+	if(NOT EXISTS "${PATH}")
+		message(FATAL_ERROR "нет файла ${PATH}")
+	endif()
+	file(READ "${PATH}" _j)
+	string(REGEX REPLACE "(^|\n)[ \t]*//[^\n]*" "\\1" _j "${_j}")
+	set(${OUT} "${_j}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# stm32_read_config(PATH PREFIX)
+#
+# Читает project.json и раскладывает его в переменные ${PREFIX}_* (CFG_* для
+# проекта, BL_* для загрузчика) в области вызывающего. Вызывается ДО project() — часть значений
+# (name/version) нужны самому project().
+#
+#   CFG_name CFG_version CFG_device     — обязательные, иначе FATAL_ERROR
+#   CFG_heap CFG_stack                  — по умолчанию 0x200 / 0x400
+#   CFG_sources CFG_include_dirs        — списки (могут быть пустыми)
+#   CFG_use_drivers                     — ON/OFF (см. ниже про "drivers")
+#   CFG_drivers                         — список опциональных модулей
+#   CFG_app_start_sector                — "" или N; только для проекта-загрузчика
+#                                         (верхний ключ app_start_sector: образ [0, N))
+#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag,port_sources}
+#                                       — секция "bootloader" (см. ниже)
+#
+# "bootloader" в project.json приложения: null / нет ключа — без загрузчика,
+#   прошивка с начала флеша; объект {"app_start_sector": N, "repo": "<git url>",
+#   "tag": "<тег>", "port_sources": [...]} — загрузчик в начале флеша, приложение
+#   — с сектора N (CFG_app_start_sector = N). Загрузчик подключается как
+#   драйверы: клонируется в Bootloader/, файлы берутся из его project.json, его
+#   CMakeLists.txt не используется. В project.json самого загрузчика тот же N
+#   задаётся верхним ключом "app_start_sector".
+#
+#   "port_sources" (необязательно) — файлы ЭТОГО проекта (пути от его
+#   project.json), которые добавляются к сборке образа загрузчика: так плата-
+#   специфичный порт (переопределяет слабые заглушки port_stub.c загрузчика)
+#   пишется в проекте, а репозиторий загрузчика остаётся общим и всегда тянется
+#   как есть, без правок под конкретную плату.
+#
+# "drivers" в project.json:
+#   нет ключа / null / false  -> драйверы не собираются вообще (CFG_use_drivers OFF)
+#   true                      -> только ядро драйверов (system/rcc/gpio/flash/irq)
+#   []                        -> то же, только ядро
+#   ["UART", "SPI", ...]      -> ядро + перечисленные модули
+#
+# Вся проверка конфига — здесь, одним проходом. Формат — данные (JSON), не
+# код: ошибиться и дописать логику в конфиг нельзя. Допускаются строки-
+# комментарии, начинающиеся с // (как в JSONC).
+# ---------------------------------------------------------------------------
+function(stm32_read_config PATH PREFIX)
+	_stm32_load_json("${PATH}" _cfg)
+
+	# --- обязательные строковые ключи ---
+	foreach(_k name version device)
+		string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" ${_k})
+		if(_e)
+			message(FATAL_ERROR "project.json: нет обязательного ключа '${_k}'")
+		endif()
+		set(${PREFIX}_${_k} "${_v}" PARENT_SCOPE)
+	endforeach()
+
+	# --- heap / stack с умолчаниями ---
+	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" heap)
+	if(_e)
+		set(_v "0x200")
+	endif()
+	set(${PREFIX}_heap "${_v}" PARENT_SCOPE)
+
+	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" stack)
+	if(_e)
+		set(_v "0x400")
+	endif()
+	set(${PREFIX}_stack "${_v}" PARENT_SCOPE)
+
+	# --- массивы -> списки ---
+	_stm32_json_array("${_cfg}" sources      _sources)
+	_stm32_json_array("${_cfg}" include_dirs _include_dirs)
+
+	# --- drivers: тристейт (см. шапку функции) ---
+	string(JSON _dt ERROR_VARIABLE _e TYPE "${_cfg}" drivers)
+	set(${PREFIX}_drivers "" PARENT_SCOPE)
+	set(_use_drivers OFF)
+	if(_e OR _dt STREQUAL "NULL")
+		set(${PREFIX}_use_drivers OFF PARENT_SCOPE)
+	elseif(_dt STREQUAL "BOOLEAN")
+		string(JSON _dv GET "${_cfg}" drivers)
+		set(_use_drivers "${_dv}")
+		set(${PREFIX}_use_drivers "${_dv}" PARENT_SCOPE)
+	elseif(_dt STREQUAL "ARRAY")
+		set(_use_drivers ON)
+		set(${PREFIX}_use_drivers ON PARENT_SCOPE)
+		_stm32_json_array("${_cfg}" drivers _list)
+		set(${PREFIX}_drivers "${_list}" PARENT_SCOPE)
+	else()
+		message(FATAL_ERROR "project.json: \"drivers\" должен быть массивом, true/false или null")
+	endif()
+
+	# --- driver_sources: файлы только для сборки с драйверами (загрузчик) ---
+	_stm32_json_array("${_cfg}" driver_sources _driver_sources)
+
+	# --- пути в конфиге — от каталога этого project.json; наружу отдаём абсолютные ---
+	get_filename_component(_root "${PATH}" DIRECTORY)
+	foreach(_l _sources _include_dirs _driver_sources)
+		set(_abs "")
+		foreach(_r ${${_l}})
+			list(APPEND _abs "${_root}/${_r}")
+		endforeach()
+		set(${_l} "${_abs}")
+	endforeach()
+	set(${PREFIX}_driver_sources "${_driver_sources}" PARENT_SCOPE)
+	set(${PREFIX}_sources      "${_sources}"      PARENT_SCOPE)
+	set(${PREFIX}_include_dirs "${_include_dirs}" PARENT_SCOPE)
+
+	# --- app_start_sector верхнего уровня: только проект-загрузчик ---
+	set(${PREFIX}_app_start_sector "" PARENT_SCOPE)
+	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" app_start_sector)
+	if(NOT _e AND NOT _t STREQUAL "NULL")
+		string(JSON _v GET "${_cfg}" app_start_sector)
+		set(${PREFIX}_app_start_sector "${_v}" PARENT_SCOPE)
+	endif()
+
+	# --- bootloader: null / нет ключа -> без загрузчика; иначе объект ---
+	set(${PREFIX}_use_bootloader OFF PARENT_SCOPE)
+	set(${PREFIX}_bootloader_repo "" PARENT_SCOPE)
+	set(${PREFIX}_bootloader_tag  "" PARENT_SCOPE)
+	set(${PREFIX}_bootloader_port_sources "" PARENT_SCOPE)
+	string(JSON _bt ERROR_VARIABLE _e TYPE "${_cfg}" bootloader)
+	if(NOT _e AND _bt STREQUAL "OBJECT")
+		string(JSON _bs ERROR_VARIABLE _e GET "${_cfg}" bootloader app_start_sector)
+		if(_e OR NOT "${_bs}" MATCHES "^[0-9]+$" OR _bs LESS 1)
+			message(FATAL_ERROR "project.json: bootloader.app_start_sector — целое число >= 1 (номер сектора, с которого начинается приложение)")
+		endif()
+		string(JSON _br ERROR_VARIABLE _e GET "${_cfg}" bootloader repo)
+		if(_e)
+			set(_br "https://github.com/vsm-stm/stm32-bootloader.git")
+		endif()
+		string(JSON _bg ERROR_VARIABLE _e GET "${_cfg}" bootloader tag)
+		if(_e)
+			set(_bg "main")
+		endif()
+		set(${PREFIX}_use_bootloader ON PARENT_SCOPE)
+		set(${PREFIX}_app_start_sector "${_bs}" PARENT_SCOPE)
+		set(${PREFIX}_bootloader_repo "${_br}" PARENT_SCOPE)
+		set(${PREFIX}_bootloader_tag  "${_bg}" PARENT_SCOPE)
+
+		# port_sources: свои файлы этого проекта (порт под конкретную плату — переопределяет
+		# слабые заглушки из port_stub.c), добавляются к сборке ОБРАЗА ЗАГРУЗЧИКА. Так
+		# репозиторий загрузчика остаётся общим и не знает про конкретные платы: он всегда
+		# тянется из репозитория как есть, а плата-специфичный код пишется поверх, в проекте.
+		set(_bps "")
+		string(JSON _bps_t ERROR_VARIABLE _e TYPE "${_cfg}" bootloader port_sources)
+		if(NOT _e AND _bps_t STREQUAL "ARRAY")
+			string(JSON _bps_n LENGTH "${_cfg}" bootloader port_sources)
+			math(EXPR _bps_last "${_bps_n} - 1")
+			foreach(_i RANGE ${_bps_last})
+				string(JSON _r GET "${_cfg}" bootloader port_sources ${_i})
+				list(APPEND _bps "${_root}/${_r}")
+			endforeach()
+		endif()
+		set(${PREFIX}_bootloader_port_sources "${_bps}" PARENT_SCOPE)
+	elseif(NOT _e AND NOT _bt STREQUAL "NULL")
+		message(FATAL_ERROR "project.json: \"bootloader\" должен быть объектом или null")
+	endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# download_one(FILE_NAME BASE_DIR URL_DIR)
+#
+#   FILE_NAME — только имя файла назначения, без пути (напр. "stm32f446xx.h")
+#   BASE_DIR  — каталог назначения, создаётся если его нет
+#   URL_DIR   — путь файла внутри репозитория STM32-base_files, напр.
+#               "Device/STM32F4xx/Include/stm32f446xx.h"
+#
+# Скачивает BASE_DIR/FILE_NAME из STM32-base_files, если его там ещё нет.
+# Четвёртый аргумент OPTIONAL — файл необязательный (напр. SVD, нужен только
+# отладчику): при неудаче выводится предупреждение, а не ошибка конфигурации.
+#
+# "Уже на месте и непустой" всегда побеждает и никогда не перекачивается — это
+# сознательно, не просто оптимизация. В конечном проекте весь каталог загрузки
+# коммитится в git (vendored, а не в .gitignore), поэтому "уже на месте"
+# обычно значит "положено предыдущей конфигурацией", а не "устаревший мусор".
+# Единственное, что должно форсировать перекачку — смена DEVICE — обрабатывается
+# вызывающей стороной: она удаляет весь каталог загрузки заранее (см.
+# stm32_sync_device()), а не эта функция, гадающая про
+# устаревание каждого файла по отдельности.
+# ---------------------------------------------------------------------------
+function(download_one FILE_NAME BASE_DIR URL_DIR)
+	set(_optional FALSE)
+	if("OPTIONAL" IN_LIST ARGN)
+		set(_optional TRUE)
+	endif()
+
 	set(DEST "${BASE_DIR}/${FILE_NAME}")
-	set(URL  "https://raw.githubusercontent.com/varvar6666/STM32-base_files/refs/heads/master/${URL_DIR}")
+	set(URL  "https://raw.githubusercontent.com/vsm-stm/STM32-base_files/refs/heads/master/${URL_DIR}")
 
 	message(STATUS "Downloading file: ${FILE_NAME}")
 
-	# если уже есть и не пустой — выходим
+	# Не перекачиваем файл, который уже лежит рядом.
 	if(EXISTS "${DEST}")
 		file(SIZE "${DEST}" SZ)
 		if(SZ GREATER 0)
@@ -27,9 +259,16 @@ function(download_one FILE_NAME BASE_DIR URL_DIR )
 
 	if(NOT CODE EQUAL 0)
 		file(REMOVE "${DEST}")
+		if(_optional)
+			message(WARNING "Optional file not available, skipped: ${URL}")
+			return()
+		endif()
 		message(FATAL_ERROR "Download failed: ${URL}\n${MSG}")
 	endif()
 
+	# Файл в 0 байт — обычно 404, который file(DOWNLOAD) не счёл жёсткой
+	# ошибкой (напр. редирект на HTML-страницу ошибки) — ловим это здесь,
+	# а не молча кладём пустой заголовок.
 	file(SIZE "${DEST}" SZ)
 	if(SZ EQUAL 0)
 		file(REMOVE "${DEST}")
@@ -39,174 +278,195 @@ function(download_one FILE_NAME BASE_DIR URL_DIR )
 	message(STATUS "Download complete! File: ${DEST}")
 endfunction()
 
+# ---------------------------------------------------------------------------
+# k_to_int(K_STR OUT)
+#
+# "128K" -> 128 (убирает хвостовую "K", которой размечены таблицы flash/RAM
+# во всех *-map.cmake, чтобы результат можно было скормить в math()).
+# ---------------------------------------------------------------------------
 function(k_to_int K_STR OUT)
 	string(REPLACE "K" "" _K "${K_STR}")
 	set(${OUT} ${_K} PARENT_SCOPE)
 endfunction()
 
-function(stm32_clean_build_dir)
-	message(STATUS "Cleaning build directory (except CMakeCache.txt)")
+# ---------------------------------------------------------------------------
+# stm32_flash_window(START END OUT_ORIGIN OUT_LENGTH)
+#
+# Окно флеша образа: сектора стирания [START, END) — START включительно, END
+# НЕ включительно (это номер сектора, с которого начинается следующий образ).
+#
+#   START ""  -> 0                   (с начала флеша)
+#   END   ""  -> число секторов чипа (до конца флеша)
+#
+# OUT_ORIGIN <- абсолютный адрес начала сектора START (напр. 0x08010000)
+# OUT_LENGTH <- байт от него до начала сектора END (или до конца флеша)
+#
+# Читает STM32_FLASH_SECTORS (список "addr;size;addr;size;...", разрешённый в
+# cmsis-download.cmake из скачанной map-таблицы). Конец флеша — адрес плюс размер
+# последнего сектора. Нецелые значения, выход за диапазон и END <= START —
+# ошибка на этапе конфигурации.
+# ---------------------------------------------------------------------------
+function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
+	list(LENGTH STM32_FLASH_SECTORS _n)
+	math(EXPR _count "${_n} / 2")
 
-	file(GLOB BUILD_FILES
-		"${CMAKE_BINARY_DIR}/*"
+	if("${START}" STREQUAL "")
+		set(START 0)
+	endif()
+	if("${END}" STREQUAL "")
+		set(END ${_count})
+	endif()
+
+	foreach(_name START END)
+		if(NOT "${${_name}}" MATCHES "^[0-9]+$")
+			message(FATAL_ERROR
+				"stm32_flash_window: ${_name} должен быть целым числом >= 0, "
+				"получено '${${_name}}'")
+		endif()
+	endforeach()
+	math(EXPR _last "${_count} - 1")
+	if(START GREATER_EQUAL _count)
+		message(FATAL_ERROR
+			"stm32_flash_window: start_sector ${START} вне диапазона - у чипа "
+			"${_count} секторов стирания (номера 0..${_last})")
+	endif()
+	if(END GREATER _count OR NOT END GREATER START)
+		message(FATAL_ERROR
+			"stm32_flash_window: end_sector ${END} недопустим для start_sector "
+			"${START} - нужно ${START} < end_sector <= ${_count} (end_sector не "
+			"включается в образ; ${_count} = до конца флеша)")
+	endif()
+
+	# список плоский: [addr0 size0 addr1 size1 ...], поэтому индекс адреса = N*2
+	math(EXPR _si "${START} * 2")
+	list(GET STM32_FLASH_SECTORS ${_si} _origin)
+
+	if(END EQUAL _count)
+		list(GET STM32_FLASH_SECTORS -2 _last_a)   # адрес последнего сектора
+		list(GET STM32_FLASH_SECTORS -1 _last_s)   # размер последнего сектора
+		math(EXPR _end_addr "${_last_a} + ${_last_s}")
+	else()
+		math(EXPR _ei "${END} * 2")
+		list(GET STM32_FLASH_SECTORS ${_ei} _end_addr)
+	endif()
+	math(EXPR _len "${_end_addr} - ${_origin}")
+
+	set(${OUT_ORIGIN} "${_origin}" PARENT_SCOPE)
+	set(${OUT_LENGTH} "${_len}"    PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# stm32_sync_device(DEVICE)
+#
+# Следит, чтобы скачанные файлы соответствовали чипу из project.json. Всё, что
+# связано со сменой чипа, — здесь одним местом:
+#   1. читает маркер cmsis-core/download_files/.device (под какой чип скачано);
+#   2. если чип сменился (или файлы лежат без маркера — считаем чужими) —
+#      стирает cmsis-core/download_files/, cmsis-core/drivers_gen/ и
+#      содержимое build-каталога, кроме CMakeCache.txt и CMakeFiles/;
+#   3. записывает маркер с текущим чипом.
+#
+# Маркер лежит рядом с файлами, а не в кеше CMake: скачанное живёт в дереве
+# проекта и переживает удаление build/.
+#
+# CMakeCache.txt и CMakeFiles/ остаются не потому что их кто-то переиспользует,
+# а потому что функция работает *во время* конфигурации, которой они
+# принадлежат — удалить их из-под идущего прохода сломало бы текущий запуск.
+# ---------------------------------------------------------------------------
+function(stm32_sync_device DEVICE)
+	set(_dl     "${CMAKE_SOURCE_DIR}/cmsis-core/download_files")
+	set(_marker "${_dl}/.device")
+
+	set(_old "")
+	if(EXISTS "${_marker}")
+		file(READ "${_marker}" _old)
+		string(STRIP "${_old}" _old)
+	endif()
+
+	if(_old STREQUAL "" AND NOT EXISTS "${_dl}")
+		message(STATUS "Initial STM32 configuration for device: ${DEVICE}")
+	elseif(NOT _old STREQUAL DEVICE)
+		message(WARNING
+			"STM32 device changed:
+"
+			"  old: ${_old}  (пусто = маркера не было)
+"
+			"  new: ${DEVICE}
+"
+			"Cleaning downloaded STM32 files and build directory."
+		)
+		file(REMOVE_RECURSE "${_dl}" "${CMAKE_SOURCE_DIR}/cmsis-core/drivers_gen")
+
+		file(GLOB _build_items "${CMAKE_BINARY_DIR}/*")
+		foreach(_item IN LISTS _build_items)
+			get_filename_component(_name "${_item}" NAME)
+			if(NOT _name STREQUAL "CMakeCache.txt" AND NOT _name STREQUAL "CMakeFiles")
+				file(REMOVE_RECURSE "${_item}")
+			endif()
+		endforeach()
+	else()
+		message(STATUS "STM32 device unchanged: ${DEVICE}")
+	endif()
+
+	file(MAKE_DIRECTORY "${_dl}")
+	file(WRITE "${_marker}" "${DEVICE}
+")
+endfunction()
+
+# ---------------------------------------------------------------------------
+# stm32_add_firmware(TARGET  SOURCES ...  [INCLUDE_DIRS ...]  [LINK ...]
+#                           [START_SECTOR N] [END_SECTOR M])
+#
+# Собирает один прошиваемый образ. Всё общее — флаги cpu/fpu, libc, warnings,
+# линкер-флаги — приходит из таргета stm32_platform (создаётся в CMakeLists.txt);
+# оптимизация и отладка — из пресета (CMAKE_<LANG>_FLAGS_<CONFIG>). Здесь только
+# то, что своё у каждого образа: окно флеша, линкер-скрипт, exe, post-build.
+#
+# START_SECTOR — номер сектора стирания, с которого начинать (с 0). Не задан = 0.
+# END_SECTOR   — номер сектора, с которого начинается СЛЕДУЮЩИЙ образ (сам не
+#   входит в этот). Не задан = до конца флеша. Линкер получает FLASH LENGTH строго
+#   по этому окну, поэтому образ, не влезший в свои сектора, — ошибка линковки
+#   (region FLASH overflowed), а не тихое наложение на соседний образ.
+#   Пример: загрузчик START 0 END 4, приложение START 4 (без END).
+#
+# Читает из области верхнего уровня: таргет stm32_platform (CMakeLists.txt) и
+# то, что задаёт cmsis-download.cmake — STM32_LINKER_TEMPLATE,
+# STM32_STARTUP_SRCS, STM32_FLASH_SECTORS, HEAP_SIZE/STACK_SIZE,
+# RAM_ORIGIN/RAM_LENGTH и переменные областей MEMORY семейства (подставляются
+# в шаблон линкер-скрипта). Поэтому вызывается из той же области, где
+# отработал cmsis-download.cmake, — из CMakeLists.txt.
+# ---------------------------------------------------------------------------
+function(stm32_add_firmware TARGET)
+	cmake_parse_arguments(FW "" "START_SECTOR;END_SECTOR" "SOURCES;INCLUDE_DIRS;LINK" ${ARGN})
+
+	# --- окно флеша под этот образ ---
+	stm32_flash_window("${FW_START_SECTOR}" "${FW_END_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
+
+	# границы окна образа — в исходники (загрузчику нужен адрес, с которого
+	# начинается следующий образ, т.е. приложение: STM32_IMAGE_FLASH_END)
+	math(EXPR _img_end "${FLASH_ORIGIN} + ${FLASH_LENGTH}" OUTPUT_FORMAT HEXADECIMAL)
+
+	# --- линкер-скрипт под эту цель ---
+	set(_ld "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.ld")
+	configure_file("${STM32_LINKER_TEMPLATE}" "${_ld}" @ONLY)
+
+	# --- исполняемый файл ---
+	add_executable(${TARGET})
+	target_sources(${TARGET} PRIVATE ${FW_SOURCES} ${STM32_STARTUP_SRCS})
+	target_include_directories(${TARGET} PRIVATE ${FW_INCLUDE_DIRS})
+	target_link_libraries(${TARGET} PRIVATE stm32_platform ${FW_LINK})
+	target_link_options(${TARGET} PRIVATE -T${_ld} -Wl,-Map=${TARGET}.map)
+	target_compile_definitions(${TARGET} PRIVATE
+		STM32_IMAGE_FLASH_ORIGIN=${FLASH_ORIGIN}U
+		STM32_IMAGE_FLASH_END=${_img_end}U)
+
+	# --- post-build: размер + .hex / .bin / .dis ---
+	add_custom_command(TARGET ${TARGET} POST_BUILD
+		COMMAND ${CMAKE_SIZE}    $<TARGET_FILE:${TARGET}>
+		COMMAND ${CMAKE_OBJCOPY} -O ihex   $<TARGET_FILE:${TARGET}> ${TARGET}.hex
+		COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${TARGET}> ${TARGET}.bin
+		COMMAND ${CMAKE_OBJDUMP} -d -S     $<TARGET_FILE:${TARGET}> > ${TARGET}.dis
 	)
 
-	foreach(item IN LISTS BUILD_FILES)
-		get_filename_component(name "${item}" NAME)
-
-		if(NOT name STREQUAL "CMakeCache.txt"
-		AND NOT name STREQUAL "CMakeFiles")
-		file(REMOVE_RECURSE "${item}")
-		endif()
-	endforeach()
-endfunction()
-
-# Uniform-page families (no variable-size sectors): PAGE_SIZE in bytes
-set(STM32G0_PAGE_SIZE 2048)
-set(STM32C0_PAGE_SIZE 2048)
-
-# ---------------------------------------------------------------------------
-# stm32_generate_flash_config(SERIES FLASH_STR DEVICE_NAME TEMPLATE OUT_FILE)
-#
-# Two modes, selected automatically:
-#
-# 1) Sector-map mode  — ${SERIES}_SECTOR_MAP is defined.
-#    Looks up FLASH_KB in the map to get single-bank sector count.
-#    If STM32_DUAL_BANK is ON, count is doubled.
-#    Map format: FLASH_KB  SECTOR_COUNT  (flat list, 2 fields per entry)
-#
-# 2) Uniform-page mode — ${SERIES}_PAGE_SIZE is defined (bytes).
-#    All pages are equal; count = FLASH_KB * 1024 / PAGE_SIZE.
-#    Generates FLASH_CFG_SECTORS_LIST — a list of {address, size} entries
-#    for use in the flash_sectors[] array inside the .h.in template.
-#
-# TEMPLATE — path to the downloaded .h.in file.
-# ---------------------------------------------------------------------------
-function(stm32_generate_flash_config SERIES FLASH_STR DEVICE_NAME TEMPLATE OUT_FILE)
-
-	# Strip the trailing "K" from flash size strings like "128K" → "128"
-	k_to_int("${FLASH_STR}" _kb)
-
-	# Resolve the two possible data sources for this family.
-	# Both are looked up by variable-variable indirection: if SERIES="STM32G0",
-	# then ${STM32G0_SECTOR_MAP} and ${STM32G0_PAGE_SIZE} are read.
-	set(_map     "${${SERIES}_SECTOR_MAP}")
-	set(_page_sz "${${SERIES}_PAGE_SIZE}")
-
-	# Always initialize to empty so the @FLASH_CFG_SECTORS_LIST@ placeholder
-	# in the template expands to an empty string for sector-map families
-	# whose templates do not use this variable.
-	set(FLASH_CFG_SECTORS_LIST "")
-
-	if(_map)
-		# --- Sector-map path --------------------------------------------------
-		# Used by families with heterogeneous sector sizes (F1, F2, F4, F7 …).
-		# The map is a flat CMake list of pairs:  FLASH_KB  SECTOR_COUNT  …
-		# e.g.  512 8  1024 12  2048 24
-		# Find the index of the matching flash size entry.
-		list(FIND _map "${_kb}" _idx)
-		if(_idx LESS 0)
-			message(FATAL_ERROR
-				"stm32_generate_flash_config: no entry for ${_kb}K in ${SERIES}_SECTOR_MAP")
-		endif()
-
-		# The sector count immediately follows the flash-size entry in the list.
-		math(EXPR _i1 "${_idx} + 1")
-		list(GET _map ${_i1} FLASH_CFG_COUNT)
-
-		# Dual-bank devices expose twice as many logical sectors.
-		if(STM32_DUAL_BANK)
-			math(EXPR FLASH_CFG_COUNT "${FLASH_CFG_COUNT} * 2")
-		endif()
-
-		set(_mode "sectors")
-
-	elseif(_page_sz)
-		# --- Uniform-page path ------------------------------------------------
-		# Used by families where all flash pages have the same size (G0, C0 …).
-		# Total page count = flash size in bytes / page size in bytes.
-		math(EXPR FLASH_CFG_COUNT "${_kb} * 1024 / ${_page_sz}")
-
-		# Build the flash_sectors[] initializer list that goes into the template
-		# via @FLASH_CFG_SECTORS_LIST@.  Each entry is one {address, size} line.
-		# Addresses are calculated as: STM32 flash base (0x08000000) + i * page_size.
-		# OUTPUT_FORMAT HEXADECIMAL makes math() emit a 0x-prefixed hex literal
-		# instead of a decimal integer (requires CMake ≥ 3.13).
-		math(EXPR _last "${FLASH_CFG_COUNT} - 1")
-		foreach(_i RANGE 0 ${_last})
-			math(EXPR _addr "0x08000000 + ${_i} * ${_page_sz}" OUTPUT_FORMAT HEXADECIMAL)
-			string(APPEND FLASH_CFG_SECTORS_LIST
-				"    { ${_addr}UL, ${_page_sz}UL }, // Sector ${_i}\n")
-		endforeach()
-
-		set(_mode "pages (${_page_sz} B each)")
-
-	else()
-		message(FATAL_ERROR
-			"stm32_generate_flash_config: neither ${SERIES}_SECTOR_MAP "
-			"nor ${SERIES}_PAGE_SIZE is defined")
-	endif()
-
-	# Variables exposed to configure_file — they replace @PLACEHOLDER@ tokens
-	# inside the .h.in template:
-	#   @FLASH_CFG_DEVICE@      — MCU name string  (e.g. "STM32G030C6")
-	#   @FLASH_CFG_FLASH_STR@   — flash size string (e.g. "32K")
-	#   @FLASH_CFG_COUNT@       — total sector / page count
-	#   @FLASH_CFG_SECTORS_LIST@— pre-built initializer lines (uniform-page only)
-	set(FLASH_CFG_DEVICE    "${DEVICE_NAME}")
-	set(FLASH_CFG_FLASH_STR "${FLASH_STR}")
-
-	# Substitute all @VAR@ tokens in the template and write the output header.
-	# @ONLY prevents CMake from also expanding ${VAR} style references that may
-	# appear in C++ comments or string literals inside the template.
-	configure_file("${TEMPLATE}" "${OUT_FILE}" @ONLY)
-
-	message(STATUS
-		"Flash config generated: ${OUT_FILE}  (${FLASH_CFG_COUNT} ${_mode}, dual_bank=${STM32_DUAL_BANK})")
-endfunction()
-
-# ---------------------------------------------------------------------------
-# stm32_generate_irq_handlers(VECTOR_FILE TEMPLATE OUT_FILE)
-#
-# Parses the vector file and generates one header with:
-#   - IRQ_TABLE_SIZE  (total peripheral slots, including reserved)
-#   - _irq_table[]   (dispatch table)
-#   - extern "C" stubs, each calling IRQ_Registry::Dispatch(XXX_IRQn)
-# ---------------------------------------------------------------------------
-function(stm32_generate_irq_handlers VECTOR_FILE TEMPLATE OUT_FILE)
-
-	# Total vector entries minus 16 ARM Cortex-M system exceptions = peripheral IRQ slots
-	file(STRINGS "${VECTOR_FILE}" _all_entries REGEX "\\(uint32_t\\)")
-	list(LENGTH _all_entries _total)
-	math(EXPR IRQ_TABLE_SIZE "${_total} - 16")
-
-	# Max handlers sharing one IRQ line — depends on MCU family
-	if(STM32_SERIES_UC MATCHES "STM32G0")
-		set(IRQ_MAX_SHARED 3)   # DMA1_Ch4_5_DMAMUX1_OVR: ch4 + ch5 + DMAMUX OVR
-	elseif(STM32_SERIES_UC MATCHES "STM32(F4|F7)")
-		set(IRQ_MAX_SHARED 2)   # timer pairs; DMA streams have own vectors
-	else()
-		set(IRQ_MAX_SHARED 2)   # safe default
-	endif()
-
-	file(STRINGS "${VECTOR_FILE}" _handler_lines
-		 REGEX "void [A-Za-z0-9_]+_IRQHandler\\(void\\)")
-
-	set(IRQ_HANDLERS_CODE "")
-
-	foreach(_line ${_handler_lines})
-		string(REGEX MATCH "void ([A-Za-z0-9_]+_IRQHandler)" _match "${_line}")
-
-		if(CMAKE_MATCH_1)
-			set(_handler_name "${CMAKE_MATCH_1}")
-			string(REPLACE "_IRQHandler" "_IRQn" _irqn_name "${_handler_name}")
-
-			string(APPEND IRQ_HANDLERS_CODE
-				"extern \"C\" void ${_handler_name}() { IRQ_Registry::Dispatch(${_irqn_name}); }\n")
-		endif()
-	endforeach()
-
-	configure_file("${TEMPLATE}" "${OUT_FILE}" @ONLY)
-
-	message(STATUS "IRQ registry generated: ${OUT_FILE}  (IRQ_TABLE_SIZE=${IRQ_TABLE_SIZE}, IRQ_MAX_SHARED=${IRQ_MAX_SHARED})")
+	message(STATUS "firmware '${TARGET}': FLASH ${FLASH_ORIGIN} + ${FLASH_LENGTH} B")
 endfunction()

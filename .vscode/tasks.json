@@ -66,24 +66,22 @@
       "detail": "List available STM32 programmer interfaces"
     },
 
+    // Приложение — единственный .elf в каталоге сборки, не bootloader.elf. Не зависит
+    // от того, какая цель выбрана в CMake Tools как "launch target" (это легко сбить —
+    // тогда "Flash project" тихо шьёт не то, что нужно; см. STM32Prog: Flash bootloader).
     {
       "type": "shell",
-      "label": "STM32Prog: Flash project (SWD)",
-      "command": "STM32_Programmer_CLI.exe",
+      "label": "STM32Prog: Flash app (SWD)",
+      "command": "powershell",
       "args": [
-        "--connect",
-        "port=swd",
-        "--download",
-        "${command:cmake.launchTargetPath}",
-        // "-hardRst",
-        "--start",
-        // "0x08000000"
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$f = Get-ChildItem -Path '${workspaceFolder}/build/${command:cmake.activeConfigurePresetName}' -Filter *.elf | Where-Object { $_.Name -ne 'bootloader.elf' } | Select-Object -First 1 -ExpandProperty FullName; if (-not $f) { Write-Error 'app .elf not found — build first'; exit 1 }; & STM32_Programmer_CLI.exe --connect port=swd --download $f --start"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": [],
-      "detail": "Flash current CMake launch target via SWD and start execution"
+      "detail": "Flash the application image (any *.elf except bootloader.elf) via SWD and start execution"
     },
 
     {
@@ -103,6 +101,36 @@
       "detail": "Perform full chip erase via SWD"
     },
 
+    {
+      "type": "shell",
+      "label": "STM32Prog: Reset target",
+      "command": "STM32_Programmer_CLI.exe",
+      "args": ["--connect", "port=swd", "-hardRst"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "detail": "Hardware reset of the target via SWD"
+    },
+
+    // Загрузчик (если в project.json задан "bootloader"): второй образ
+    // build/<пресет>/bootloader.elf. Не стартует после прошивки — обычно шьётся
+    // вместе с приложением ("Build + Flash all"), запуск делает "Flash app".
+    {
+      "type": "shell",
+      "label": "STM32Prog: Flash bootloader (SWD)",
+      "command": "STM32_Programmer_CLI.exe",
+      "args": [
+        "--connect",
+        "port=swd",
+        "--download",
+        "${workspaceFolder}/build/${command:cmake.activeConfigurePresetName}/bootloader.elf"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "detail": "Flash bootloader.elf (only when project.json has bootloader)"
+    },
+
     // ======================================================
     // Combined tasks
     // ======================================================
@@ -114,10 +142,24 @@
       "dependsOrder": "sequence",
       "dependsOn": [
         "CMake: Build",
-        "STM32Prog: Flash project (SWD)"
+        "STM32Prog: Flash app (SWD)"
       ],
       "problemMatcher": [],
-      "detail": "Clean rebuild project and flash it to STM32"
+      "detail": "Build project and flash the application image"
+    },
+
+    {
+      "type": "shell",
+      "label": "Build + Flash all (bootloader + app)",
+      "command": "echo Build and flash bootloader and application",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "CMake: Build",
+        "STM32Prog: Flash bootloader (SWD)",
+        "STM32Prog: Flash app (SWD)"
+      ],
+      "problemMatcher": [],
+      "detail": "Build, flash bootloader.elf, then the application image"
     }
 
   ]
