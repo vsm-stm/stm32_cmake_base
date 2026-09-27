@@ -61,8 +61,11 @@ target_link_options(stm32_platform INTERFACE
 	-Wl,--gc-sections
 	--specs=nano.specs --specs=nosys.specs
 	-Wl,--start-group -lc -lm -lstdc++ -lsupc++ -Wl,--end-group
-	-Wl,-z,max-page-size=8            # плотная упаковка секций по адресам
-	-Wl,--wrap=__register_exitproc    # C++ статические деструкторы не нужны без ОС
+	-Wl,-z,max-page-size=8              # плотная упаковка секций по адресам
+	-Wl,--wrap=__register_exitproc      # C++ статические деструкторы не нужны без ОС
+	-Wl,--no-warn-rwx-segments          # линкер-скрипты не разносят код/данные по сегментам:
+	                                     # без MMU/MPU биты прав в ELF ни на что не влияют, а
+	                                     # разбивка по сегментам ломается на пустых .data/.ccmram
 	-Wl,--print-memory-usage
 )
 
