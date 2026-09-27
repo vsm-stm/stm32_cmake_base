@@ -36,12 +36,12 @@
     {
       "label": "$(run) Build+Flash",
       "task": "Build + Flash",
-      "tooltip": "Собрать, прошить активную цель CMake и запустить"
+      "tooltip": "Собрать и прошить приложение"
     },
     {
       "label": "$(run-all) Flash all",
       "task": "Build + Flash all (bootloader + app)",
-      "tooltip": "С загрузчиком: собрать, прошить bootloader.elf и активную цель (выберите приложение)"
+      "tooltip": "С загрузчиком: собрать, прошить bootloader.elf и приложение"
     },
     {
       "label": "$(chip) Flash BL",
@@ -49,9 +49,9 @@
       "tooltip": "Прошить только bootloader.elf"
     },
     {
-      "label": "$(desktop-download) Flash",
-      "task": "STM32Prog: Flash project (SWD)",
-      "tooltip": "Прошить активную цель CMake по SWD (без сборки)"
+      "label": "$(desktop-download) Flash App",
+      "task": "STM32Prog: Flash app (SWD)",
+      "tooltip": "Прошить приложение (любой *.elf, кроме bootloader.elf) по SWD и запустить"
     },
     {
       "label": "$(refresh) Reset",

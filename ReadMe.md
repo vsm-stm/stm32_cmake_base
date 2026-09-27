@@ -121,7 +121,7 @@
 
   Драйверы поддерживают STM32 **F4 / F7 / G0**. Для остальных семейств (в т.ч. G4) ставьте `null` и пишите под регистры сами, либо портируйте драйверы.
 - `sources` / `include_dirs` — ваш код и include-пути.
-- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "..."}` (`repo`/`tag` необязательны; по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` / `driver_sources` из его `project.json`; его `CMakeLists.txt` не используется. Драйверы включены → добавляются `driver_sources`. Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
+- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "port_sources": [...]}` (`repo`/`tag`/`port_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` / `driver_sources` из его `project.json`; его `CMakeLists.txt` не используется. Драйверы включены → добавляются `driver_sources`. `port_sources` — файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика — так плата-специфичный порт (переопределяет слабые заглушки загрузчика) пишется в проекте, а репозиторий загрузчика остаётся общим и всегда тянется как есть. Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
 Автономный загрузчик (`stm32-bootloader`) скачивает файлы этой платформы (`cmake/`, `no_system_files/`, `cmsis-core/Include`) в своё дерево и запускает тот же сценарий; в его `project.json` верхний ключ `app_start_sector` задаёт `[0, N)`. Определение `STM32_DEVICE_HEADER` (`"stm32f4xx.h"`) позволяет коду без драйверов писать `#include STM32_DEVICE_HEADER`.
 
@@ -169,15 +169,15 @@ build/<preset>/
 Что уже настроено:
 
 - сборка через активный `CMake` preset (`CMake: Build`);
-- прошивка активной цели CMake через `STM32_Programmer_CLI.exe` по `SWD` (`STM32Prog: Flash project (SWD)`);
+- прошивка приложения через `STM32_Programmer_CLI.exe` по `SWD` (`STM32Prog: Flash app (SWD)`) — находит `*.elf` в каталоге сборки сама, кроме `bootloader.elf`, и не зависит от того, какая цель выбрана в CMake Tools как launch target;
 - прошивка загрузчика (`STM32Prog: Flash bootloader (SWD)`) и обоих образов подряд (`Build + Flash all`) — если в `project.json` задан `bootloader`;
 - полное стирание чипа;
 - отладка через `cortex-debug`: `ST-Link Launch` / `ST-Link Attach` (штатный GDB-сервер ST-Link), `ST-Link-OCD` / `ST-Link-OCD-SWO` (OpenOCD, семейство выбирается при запуске; SWO — вывод трассировки), `VS_Launch` (расширение ST для VS Code);
 - использование локально скачанного `SVD` файла.
 
-Кнопки в строке состояния (расширение «Task Buttons», `VsCodeTaskButtons.tasks` в `settings.json`) дублируют задачи, так что командная строка не нужна: `Configure`, `Build`, `Rebuild`, `Build+Flash`, `Flash all` (загрузчик + приложение), `Flash BL`, `Flash`, `Reset`, `Erase`, `Probes`.
+Кнопки в строке состояния (расширение «Task Buttons», `VsCodeTaskButtons.tasks` в `settings.json`) дублируют задачи, так что командная строка не нужна: `Configure`, `Build`, `Rebuild`, `Build+Flash`, `Flash all` (загрузчик + приложение), `Flash BL`, `Flash App`, `Reset`, `Erase`, `Probes`.
 
-Цель CMake (`cmake.launchTargetPath`) — тот образ, который шьётся и отлаживается: с загрузчиком целей две (`bootloader` и `firmware`), нужную выбирают в строке состояния CMake.
+Для **отладки** (не прошивки) нужна цель CMake (`cmake.launchTargetPath`) — с загрузчиком целей две (`bootloader` и `firmware`), нужную выбирают в строке состояния CMake; см. ниже.
 
 Типичный сценарий в VS Code:
 
@@ -185,7 +185,7 @@ build/<preset>/
 2. Выбрать configure preset, например `debug`.
 3. Выполнить `CMake: Configure`.
 4. Выполнить `CMake: Build`.
-5. Запустить задачу `STM32Prog: Flash project (SWD)` или `Build + Flash` (с загрузчиком — `Build + Flash all`).
+5. Запустить задачу `STM32Prog: Flash app (SWD)` или `Build + Flash` (с загрузчиком — `Build + Flash all`).
 6. Для отладки выбрать конфигурацию из `launch.json` (см. выше).
 
 Отладка приложения с загрузчиком: прошейте оба образа, выберите цель `firmware` и используйте `ST-Link Attach`. Запуск `ST-Link Launch` перепрошивает и сбрасывает ядро; приложение стартует только через загрузчик, который передаёт ему управление.
