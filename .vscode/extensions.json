@@ -10,7 +10,7 @@
 		"ms-vscode.hexeditor",                  // Provides hex editor fo viewing & anipulating files in their raw hexadecimal representation
 		"trond-snekvik.gnu-mapfiles",           // Provides syntax highlighting and symbol listing for GNU linker .map files
 		"jeff-hykin.better-cpp-syntax",         // Provides syntax highlighting for C++
-		"spencerwmiles.vscode-task-buttons",    // Кнопки задач (VsCodeTaskButtons.tasks в settings.json) в строке состояния
+		"spencerwmiles.vscode-task-buttons",    // Task buttons (VsCodeTaskButtons.tasks in settings.json) in the status bar
 		"marus25.cortex-debug",		            // Provides debug support on Arm Cortex-M
 		"mcu-debug.debug-tracker-vscode",       // Dependencies to "marus25.cortex-debug"
 		"mcu-debug.memory-view",                // Dependencies to "marus25.cortex-debug"

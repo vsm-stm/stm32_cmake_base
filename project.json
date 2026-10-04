@@ -1,32 +1,33 @@
 {
-	// Комментарии допустимы только целой строкой, начинающейся с //
+	// Comments are only allowed as whole lines starting with //
 
-	// имя проекта и версия (имя = имя целевого файла .elf)
+	// project name and version (name = target .elf file name)
 	"name":         "firmware",
 	"version":      "3.2",
 
-	// полный код чипа, напр. STM32F446RE, STM32F429ZI, STM32G474RE
+	// full chip part number, e.g. STM32F446RE, STM32F429ZI, STM32G474RE
 	"device":       "STM32f446ret",
-	// размер heap и stack для линкер-скрипта (по умолчанию 0x200 / 0x400)
+	// heap and stack size for the linker script (default 0x200 / 0x400)
 	"heap":         "0x200",
 	"stack":        "0x400",
 
-	// драйверы STM32_Drivers_CPP (поддержаны F4 / F7 / G0):
-	//   null / false / нет ключа  — не собирать вообще
-	//   true или []               — только ядро (system, rcc, gpio, flash, irq)
-	//   ["UART", "SPI", ...]      — ядро + перечисленные модули
+	// STM32_Drivers_CPP drivers (supported on F4 / F7 / G0):
+	//   null / false / key absent — do not build drivers at all
+	//   true or []                — core only (system, rcc, gpio, flash, irq)
+	//   ["UART", "SPI", ...]      — core + listed modules
 	"drivers":      null,
 
-	// ваш код и include-пути
+	// your code and include paths
 	"sources":      ["src/main.cpp"],
 	"include_dirs": ["inc"],
 
-	// загрузчик (репозиторий stm32-bootloader):
-	//   null / нет ключа — без загрузчика, прошивка с начала флеша
-	//   {"app_start_sector": N, "repo": "<url>", "tag": "<тег>", "port_sources": [...]} —
-	//   загрузчик в начале флеша (сектора [0, N)), эта прошивка — с сектора N. Загрузчик
-	//   клонируется в Bootloader/ и собирается этим же проектом (repo/tag необязательны).
-	//   port_sources — свои файлы (плата-специфичный порт), добавляются к сборке
-	//   образа загрузчика поверх его слабых заглушек; необязательно.
+	// bootloader (stm32-bootloader repository):
+	//   null / key absent — no bootloader, firmware starts at the beginning of flash
+	//   {"app_start_sector": N, "repo": "<url>", "tag": "<tag>", "extra_sources": [...]} —
+	//   bootloader at the start of flash (sectors [0, N)), this firmware starts at sector N.
+	//   The bootloader is cloned into Bootloader/ and built by this same project
+	//   (repo/tag are optional). extra_sources — your own files: stm32-bootloader has
+	//   no main() of its own (it is a library - image check, jump, update flag), you
+	//   write main() for the bootloader image and add it here.
 	"bootloader":   null
 }

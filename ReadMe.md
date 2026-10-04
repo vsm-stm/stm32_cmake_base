@@ -1,5 +1,400 @@
 # STM32 CMake Base
 
+*[English](#english) · [Русский](#русский)*
+
+---
+
+## English
+
+This repository is a starter template for bare-metal `STM32` development in
+`C/C++` using `CMake`, `arm-none-eabi-gcc`, `CMSIS`, and the author's own set
+of drivers. The project is set up to work from `VS Code`, but is not tied to
+an IDE and builds from the command line just as well.
+
+The repository's core idea:
+
+- spin up a new STM32 project quickly, without CubeMX;
+- generate the linker script for the chosen chip automatically;
+- pull CMSIS/device/startup files straight from an external repository.
+
+This is specifically a starting base for an application, not the application itself.
+
+## What's inside
+
+At the top level:
+
+- `project.json` — the **single configuration file**: name, version, chip, heap/stack,
+  driver list, sources, include paths, bootloader (`bootloader`). Data only, no code.
+- `CMakeLists.txt` — the glue: config → toolchain → `project()` → downloads →
+  the `stm32_platform` target (flags that do not depend on the configuration) →
+  drivers → `stm32_add_firmware()`. Rarely edited.
+- `CMakePresets.json` — the `debug`, `debug-o0`, `release`, `relWithDebInfo`,
+  `minSizeRel` presets. Also the **single place for optimization/debug flags**
+  (`-Og/-O0/-Os`, `-g*`, `NDEBUG`) — via `CMAKE_<C|CXX>_FLAGS_<CONFIG>`.
+- `cmake/functions.cmake` — every platform function (reading the config,
+  `stm32_add_firmware`, downloading files), definitions only.
+- `cmake/cmsis-download.cmake` — procedural, runs once: downloads
+  CMSIS/startup/vectors, parses the chip, picks the linker script template.
+  Only fetches files and facts — no flags here.
+- `cmake/toolchain.cmake` — picks the `arm-none-eabi-*` compiler.
+- `src/` — the application's own code (a CMSIS example).
+- `inc/` — the application's own headers (`main.hpp` — commented-out driver includes).
+- `Drivers/` — the `STM32_Drivers_CPP` library; cloned on the first configure
+  if `"drivers"` is enabled (in `.gitignore`).
+- `Bootloader/` — the bootloader repository; cloned if `"bootloader"` is set
+  in `project.json` (in `.gitignore`).
+- `no_system_files/` — `syscalls.c` and `sysmem.c` for newlib/newlib-nano.
+- `cmsis-core/` — the local base of CMSIS Core headers.
+- `cmsis-core/download_files/` — the downloaded startup/device/linker/SVD
+  files for the selected MCU.
+- `.vscode/` — ready-made tasks, flashing, and debugging via ST-Link.
+
+## What the project does during configure
+
+During `cmake configure`, the project:
+
+1. `stm32_read_config()` reads `project.json` into `CFG_*` variables and validates them.
+2. Takes the target microcontroller's name (`CFG_device`), determines the
+   family, startup file, device headers, and memory sizes.
+3. Downloads any missing files from the `STM32-base_files` repository:
+   - `startup_common.c`
+   - `vector_<device>.c`
+   - device headers
+   - `system_<series>.c/.h`
+   - `SVD`
+   - the linker script template
+4. Creates the `stm32_platform` target in `CMakeLists.txt` — every compiler
+   and linker flag in one place.
+5. If `"drivers"` is not `null`/`false` — links in `Drivers/` (the first
+   configure clones it).
+6. If `"bootloader"` is set — clones `Bootloader/` and builds it as the first
+   `bootloader` image, in sectors `[0, N)`.
+7. `stm32_add_firmware()` renders the `.ld` for the image's flash window and
+   builds `.elf/.hex/.bin/.dis` (for the application with a bootloader — starting at sector `N`).
+
+The drivers generate `flash_config.h` / `irq_registry_config.h` themselves
+(these are their own internal headers).
+
+The `cmsis-core/download_files/.device` marker remembers which chip the files
+were downloaded for. If `"device"` changed (or the files are sitting there
+without a marker), `cmake/cmsis-download.cmake` wipes the downloaded files and
+build artifacts and re-downloads — even after `rm -rf build`.
+
+## What this repository is a good fit for
+
+The repository is a good fit if you need:
+
+- a bare-metal project with no HAL;
+- file-level control over startup/linker/CMSIS;
+- building via `CMake` and `Ninja`;
+- working in `VS Code` with `CMake Tools` and `cortex-debug`;
+- a base for your own driver library.
+
+## Example application
+
+The current `src/main.cpp` is a minimal plain-CMSIS example (no drivers,
+`"drivers": null`):
+
+- enables `GPIOA` clocking (`RCC->AHB1ENR`);
+- sets `PA5` (the Nucleo-F446RE LED) to output;
+- toggles it forever with a software delay.
+
+The example is written for F4; on another family, replace the port clock
+enable. The chip header is included as `#include STM32_DEVICE_HEADER` (the
+define is set by the platform).
+
+A commented-out drivers-based variant is left in the code (`System::Init()`,
+`ClockSystem::Init_calc_pll(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
+to enable it, set `"drivers": true` and uncomment the drivers-core includes
+in `inc/main.hpp`.
+
+## Requirements
+
+Working with the project needs:
+
+- `CMake` version `3.24+`
+- `Ninja`
+- the `arm-none-eabi-gcc` toolchain on `PATH`
+- `arm-none-eabi-g++`
+- `arm-none-eabi-objcopy`
+- `arm-none-eabi-objdump`
+- `arm-none-eabi-size`
+- `git`
+
+For flashing and debugging, also:
+
+- the `STM32CubeProgrammer` CLI (`STM32_Programmer_CLI.exe`)
+- an `ST-Link`
+- for debugging from VS Code: the `cortex-debug` extension
+- for working with CMake in VS Code: the `ms-vscode.cmake-tools` extension
+
+## Quick start
+
+### 1. Configure the project
+
+Everything lives in one file — `project.json`. Whole-line comments starting
+with `//` are allowed (as in JSONC; in VS Code the file is already associated
+with the `jsonc` mode, so highlighting does not complain). Trailing comments
+after a value are not supported. Here is an example without comments:
+
+```json
+{
+  "name":         "firmware",
+  "version":      "3.2",
+  "device":       "STM32F446RE",
+  "heap":         "0x200",
+  "stack":        "0x400",
+  "drivers":      null,
+  "sources":      ["src/main.cpp"],
+  "include_dirs": ["inc"],
+  "bootloader":   null
+}
+```
+
+- `device` — the full chip part number (`STM32F446RE`, `STM32F429ZI`,
+  `STM32F407VG`); must match the grammar `cmake/cmsis-download.cmake` understands.
+- `drivers` — whether to pull in the `STM32_Drivers_CPP` library:
+  - `null` / `false` / key absent — drivers are not built at all (plain CMSIS + your own code);
+  - `true` or `[]` — core only (system / rcc / gpio / flash / irq_registry);
+  - `["UART", "SPI", "DSP", ...]` — core + the listed optional modules
+    (`UART`, `SPI`, `DMA`, `TIM`, `RTC`, `ADC`, `DAC`, `I2C`, `MODBUS`,
+    `CONTAINERS`, `PID` — the author's own PID controller, `DSP` — a subset
+    of Arm's CMSIS-DSP).
+
+  Drivers support STM32 **F4 / F7 / G0**. For other families (including G4),
+  set `null` and write your own register-level code, or port the drivers.
+- `sources` / `include_dirs` — your code and include paths.
+- `bootloader` — `null` / key absent: no bootloader, firmware starts at the
+  beginning of flash (no sectors). `{"app_start_sector": N, "repo": "...",
+  "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` are
+  optional; `repo`/`tag` default to `vsm-stm/stm32-bootloader`, `main`):
+  bootloader at the start of flash (sectors `[0, N)`), firmware starts at
+  sector `N`. The platform clones the repository into `Bootloader/` (like
+  `Drivers/`) and builds it as a **second image** in this same project: it
+  takes the `sources` / `include_dirs` lists from its own `project.json`; its
+  `CMakeLists.txt` is not used. `stm32-bootloader` is a small library (image
+  check, jump, update flag) with no `main()` of its own — `extra_sources` IS
+  main() for the bootloader image (and whatever else it needs): files of THIS
+  project (paths relative to its own `project.json`) that get added to the
+  bootloader image build. Both projects' `include_dirs` are now shared both
+  ways: the bootloader sees this project's `include_dirs`, and this project
+  sees the bootloader's `include_dirs` (usually `Bootloader/src`, which holds
+  headers shared by both sides, such as the "update requested" flag; nothing
+  is copy-pasted). Every image gets `STM32_IMAGE_FLASH_ORIGIN/END`. An image
+  that does not fit its sectors is a link error (`region FLASH overflowed`).
+  Firmware starting at sector `N > 0` will not run on its own: on reset the
+  core takes the vector table from `0x08000000` — the bootloader has to be the
+  one that runs it.
+
+The standalone bootloader (`stm32-bootloader`) downloads this platform's own
+files (`cmake/`, `no_system_files/`, `cmsis-core/Include`) into its own tree
+and runs the same build script; its `project.json`'s top-level `app_start_sector`
+key sets `[0, N)`. The `STM32_DEVICE_HEADER` define (`"stm32f4xx.h"`) lets
+code without drivers write `#include STM32_DEVICE_HEADER`.
+
+Flags: ones that do not depend on the configuration live in the
+`stm32_platform` target in `CMakeLists.txt`; optimization and debug info live
+in `CMakePresets.json`. There are no flags in `project.json`.
+
+### 2. Configure and build
+
+From the repository root:
+
+```powershell
+cmake --preset debug
+cmake --build --preset debug
+```
+
+For a release build:
+
+```powershell
+cmake --preset release
+cmake --build --preset release
+```
+
+Artifacts land in:
+
+```text
+build/<preset>/
+```
+
+After the build, these are created automatically:
+
+- `.elf`
+- `.hex`
+- `.bin`
+- `.map`
+- `.dis`
+
+## Working from VS Code
+
+The repository already has:
+
+- `CMakePresets.json`
+- `.vscode/tasks.json`
+- `.vscode/launch.json`
+- `.vscode/settings.json`
+
+Already set up:
+
+- build via the active `CMake` preset (`CMake: Build`);
+- flashing the application via `STM32_Programmer_CLI.exe` over `SWD`
+  (`STM32Prog: Flash app (SWD)`) — finds the `*.elf` in the build directory
+  itself, except `bootloader.elf`, and does not depend on which target CMake
+  Tools has selected as the launch target;
+- flashing the bootloader (`STM32Prog: Flash bootloader (SWD)`) and both
+  images in sequence (`Build + Flash all`) — if `bootloader` is set in `project.json`;
+- full chip erase;
+- debugging via `cortex-debug`: `ST-Link Launch` / `ST-Link Attach` (ST-Link's
+  own GDB server), `ST-Link-OCD` / `ST-Link-OCD-SWO` (OpenOCD, family picked
+  at launch; SWO is trace output), `VS_Launch` (ST's own VS Code extension);
+- using the locally downloaded `SVD` file.
+
+Status bar buttons (the "Task Buttons" extension, `VsCodeTaskButtons.tasks`
+in `settings.json`) mirror the tasks, so the command line is not needed:
+`Configure`, `Build`, `Rebuild`, `Build+Flash`, `Flash all` (bootloader +
+application), `Flash BL`, `Flash App`, `Reset`, `Erase`, `Probes`.
+
+For **debugging** (not flashing) you need a CMake target
+(`cmake.launchTargetPath`) — with a bootloader there are two targets
+(`bootloader` and `firmware`), pick the one you need in the CMake status bar; see below.
+
+A typical VS Code workflow:
+
+1. Open the project folder.
+2. Pick a configure preset, e.g. `debug`.
+3. Run `CMake: Configure`.
+4. Run `CMake: Build`.
+5. Run the `STM32Prog: Flash app (SWD)` task, or `Build + Flash` (with a
+   bootloader — `Build + Flash all`).
+6. For debugging, pick a configuration from `launch.json` (see above).
+
+Debugging an application that has a bootloader: flash both images, select the
+`firmware` target, and use `ST-Link Attach`. Running `ST-Link Launch`
+reflashes and resets the core; the application only starts via the
+bootloader, which hands control to it.
+
+## Flashing from the command line
+
+If `STM32_Programmer_CLI.exe` is on `PATH`, you can flash like this:
+
+```powershell
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/<project>.elf --start
+```
+
+With a bootloader — flash the bootloader first, then the application
+(addresses are baked into the ELF):
+
+```powershell
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/bootloader.elf
+STM32_Programmer_CLI.exe --connect port=swd --download build/debug/<project>.elf --start
+```
+
+List available interfaces:
+
+```powershell
+STM32_Programmer_CLI.exe --list
+```
+
+Full erase:
+
+```powershell
+STM32_Programmer_CLI.exe --connect port=swd --erase all
+```
+
+## Adding your own code
+
+Usually all you need is:
+
+1. Add `.cpp/.c` files to `src/`.
+2. Add headers to `inc/`.
+3. List the new sources in `"sources"` in `project.json`.
+4. Add include paths to `"include_dirs"` if needed.
+5. Add any needed driver modules to the `"drivers"` array.
+
+## Switching the project to a different STM32
+
+1. Change `"device"` in `project.json`.
+2. Reconfigure the project: `cmake --preset debug`.
+3. If needed, delete the old `build/` directory if it still holds artifacts
+   from a different chip.
+4. For OpenOCD debugging, pick the new chip's family when launching the
+   profile (see below). Nothing else in `.vscode` needs changing.
+
+### What in `.vscode` does not depend on the chip
+
+The chip name is no longer baked into `launch.json` and `tasks.json`:
+
+- the SVD comes from `cmsis-core/download_files/SVD.svd` — downloaded for the
+  chip in `project.json`;
+- the executable is `${command:cmake.launchTargetPath}` (the active CMake
+  target), the project name is not hardcoded;
+- `preLaunchTask` is `CMake: Build` (the active preset);
+- the ST-Link profiles (`ST-Link Launch` / `ST-Link Attach`) do not use a
+  `device` field;
+- in the OpenOCD profiles, the `target/<family>.cfg` file is picked from a
+  list at launch (`stm32f4x`, `stm32g4x`, …); the path to the scripts comes
+  from the OpenOCD installation;
+- `cpuFrequency` in `swoConfig` is the core clock in Hz (not a chip name); set
+  it to match your clock configuration.
+
+## Important caveats and limitations
+
+- The project depends on downloading files from GitHub during configure.
+  Without network access, the first setup will not succeed if the needed
+  files are not already present locally.
+- In `CMakeLists.txt` the linker script comes from
+  `cmsis-core/download_files/linker/`, so the final working configuration
+  must be there.
+- The template is geared toward CMSIS and the author's own drivers, not HAL/LL.
+- The bootloader is still a skeleton: image check and jumping to the
+  application are implemented, an update protocol is not (see `stm32-bootloader`).
+- Drivers currently support only F4 / F7 / G0. For other families (G4, etc.)
+  — use `"drivers": null`.
+- The `src/main.cpp` demo is written for F4 (`RCC->AHB1ENR`, PA5); on other
+  families you need to replace it with your own code.
+- `main.cpp` currently uses direct register access, so the initial clock/init
+  state depends on the MCU's reset state.
+- Without a preset (`cmake -B ...` directly) there is no optimization — use `cmake --preset ...`.
+
+## What to do right after cloning
+
+- set your own `"device"` in `project.json`;
+- check that `arm-none-eabi-*` are available from the console;
+- run `cmake --preset debug`;
+- make sure the needed startup/device/linker files were downloaded;
+- pick a debug profile (`ST-Link` or OpenOCD) and, for SWO, set
+  `cpuFrequency` in `.vscode/launch.json`;
+- replace the demo `src/main.cpp` with your own application logic.
+
+## Where to look first
+
+If you want to get a quick feel for the project, start with these files:
+
+- `project.json` — the whole project configuration.
+- `CMakeLists.txt` — how config, platform, drivers, and the image fit together.
+- `cmake/functions.cmake` — `stm32_read_config()`, `stm32_add_firmware()`, and the other functions.
+- `cmake/cmsis-download.cmake` — where the startup/header/linker files come from.
+- `src/main.cpp` — a minimal CMSIS example.
+- `Drivers/src/*.hpp` — the available drivers and their API (described in `Drivers/ReadMe.md`).
+
+## Summary
+
+This repository is a convenient base for your own bare-metal `STM32`
+projects, if you want to:
+
+- build everything through `CMake`;
+- not depend on CubeMX;
+- use CMSIS and your own C++ drivers;
+- have a ready-made start for building, flashing, and debugging in `VS Code`.
+
+For the first run, the main thing is bringing `"device"` in `project.json`,
+the startup/linker/SVD, and the debug configuration to the same microcontroller.
+
+---
+
+## Русский
+
 Этот репозиторий представляет собой стартовый шаблон для bare-metal разработки под `STM32` на `C/C++` с использованием `CMake`, `arm-none-eabi-gcc`, `CMSIS` и набора собственных драйверов автора. Проект рассчитан на работу из `VS Code`, но не привязан к IDE и может собираться из командной строки.
 
 Основная идея репозитория:
@@ -121,7 +516,7 @@
 
   Драйверы поддерживают STM32 **F4 / F7 / G0**. Для остальных семейств (в т.ч. G4) ставьте `null` и пишите под регистры сами, либо портируйте драйверы.
 - `sources` / `include_dirs` — ваш код и include-пути.
-- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "port_sources": [...]}` (`repo`/`tag`/`port_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` / `driver_sources` из его `project.json`; его `CMakeLists.txt` не используется. Драйверы включены → добавляются `driver_sources`. `port_sources` — файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика — так плата-специфичный порт (переопределяет слабые заглушки загрузчика) пишется в проекте, а репозиторий загрузчика остаётся общим и всегда тянется как есть. Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
+- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), без собственного `main()` — `extra_sources` это и есть main() для образа загрузчика (и всё, что ему нужно): файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
 Автономный загрузчик (`stm32-bootloader`) скачивает файлы этой платформы (`cmake/`, `no_system_files/`, `cmsis-core/Include`) в своё дерево и запускает тот же сценарий; в его `project.json` верхний ключ `app_start_sector` задаёт `[0, N)`. Определение `STM32_DEVICE_HEADER` (`"stm32f4xx.h"`) позволяет коду без драйверов писать `#include STM32_DEVICE_HEADER`.
 

@@ -66,9 +66,10 @@
       "detail": "List available STM32 programmer interfaces"
     },
 
-    // Приложение — единственный .elf в каталоге сборки, не bootloader.elf. Не зависит
-    // от того, какая цель выбрана в CMake Tools как "launch target" (это легко сбить —
-    // тогда "Flash project" тихо шьёт не то, что нужно; см. STM32Prog: Flash bootloader).
+    // The application - the one .elf in the build directory that is not bootloader.elf.
+    // Does not depend on whichever target CMake Tools has selected as the "launch
+    // target" (easy to get wrong - "Flash project" would then silently flash the
+    // wrong thing; see STM32Prog: Flash bootloader).
     {
       "type": "shell",
       "label": "STM32Prog: Flash app (SWD)",
@@ -111,9 +112,10 @@
       "detail": "Hardware reset of the target via SWD"
     },
 
-    // Загрузчик (если в project.json задан "bootloader"): второй образ
-    // build/<пресет>/bootloader.elf. Не стартует после прошивки — обычно шьётся
-    // вместе с приложением ("Build + Flash all"), запуск делает "Flash app".
+    // The bootloader (when project.json has "bootloader"): a second image,
+    // build/<preset>/bootloader.elf. Does not start running after flashing - it is
+    // normally flashed together with the application ("Build + Flash all"),
+    // "Flash app" is what actually starts execution.
     {
       "type": "shell",
       "label": "STM32Prog: Flash bootloader (SWD)",

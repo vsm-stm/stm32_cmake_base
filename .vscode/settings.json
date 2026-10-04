@@ -21,52 +21,52 @@
     {
       "label": "$(gear) Configure",
       "task": "CMake: Configure",
-      "tooltip": "CMake configure с активным пресетом"
+      "tooltip": "CMake configure with the active preset"
     },
     {
       "label": "$(tools) Build",
       "task": "CMake: Build",
-      "tooltip": "Собрать проект (активный пресет)"
+      "tooltip": "Build the project (active preset)"
     },
     {
       "label": "$(debug-restart-frame) Rebuild",
       "task": "CMake: Clean rebuild",
-      "tooltip": "Чистая пересборка"
+      "tooltip": "Clean rebuild"
     },
     {
       "label": "$(run) Build+Flash",
       "task": "Build + Flash",
-      "tooltip": "Собрать и прошить приложение"
+      "tooltip": "Build and flash the application"
     },
     {
       "label": "$(run-all) Flash all",
       "task": "Build + Flash all (bootloader + app)",
-      "tooltip": "С загрузчиком: собрать, прошить bootloader.elf и приложение"
+      "tooltip": "With a bootloader: build, flash bootloader.elf and the application"
     },
     {
       "label": "$(chip) Flash BL",
       "task": "STM32Prog: Flash bootloader (SWD)",
-      "tooltip": "Прошить только bootloader.elf"
+      "tooltip": "Flash only bootloader.elf"
     },
     {
       "label": "$(desktop-download) Flash App",
       "task": "STM32Prog: Flash app (SWD)",
-      "tooltip": "Прошить приложение (любой *.elf, кроме bootloader.elf) по SWD и запустить"
+      "tooltip": "Flash the application (any *.elf except bootloader.elf) via SWD and start it"
     },
     {
       "label": "$(refresh) Reset",
       "task": "STM32Prog: Reset target",
-      "tooltip": "Аппаратный сброс МК"
+      "tooltip": "Hardware reset of the MCU"
     },
     {
       "label": "$(close) Erase",
       "task": "STM32Prog: Full chip erase",
-      "tooltip": "Полное стирание чипа по SWD"
+      "tooltip": "Full chip erase via SWD"
     },
     {
       "label": "$(list) Probes",
       "task": "STM32Prog: List interfaces",
-      "tooltip": "Список подключённых программаторов"
+      "tooltip": "List connected programmers"
     }
   ],
 
