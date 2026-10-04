@@ -85,11 +85,11 @@
 			"enabled": true,
 			"source": "probe",
 			"swoFrequency": 2000000,
-			// cpuFrequency — тактовая частота ядра (SYSCLK/HCLK) в Гц, а не имя чипа.
-			// Должна совпадать с тем, что реально выставляет прошивка (ClockSystem::Init...):
-			// 16000000 — это HSI по умолчанию после сброса; после настройки PLL укажите
-			// свою частоту (напр. 180000000). При несовпадении SWO-вывод будет мусором.
-			// swoFrequency — скорость SWO-линии, тоже подбирается под связку зонд/чип.
+			// cpuFrequency - the core clock (SYSCLK/HCLK) in Hz, not a chip name.
+			// Must match what the firmware actually configures (ClockSystem::Init...):
+			// 16000000 is the default HSI right after reset; once PLL is configured,
+			// set your real frequency (e.g. 180000000). A mismatch turns the SWO output into garbage.
+			// swoFrequency - the SWO line speed, also tuned to the probe/chip pair.
 			"cpuFrequency": 16000000,
 			"decoders": [
 				{
@@ -128,10 +128,10 @@
   ],
   "inputs": [
     {
-      // семейство чипа для OpenOCD (файл target/<...>.cfg); имя чипа в launch.json не зашито
+      // the chip family for OpenOCD (target/<...>.cfg file); the chip name is not hardcoded in launch.json
       "id": "openocdTarget",
       "type": "pickString",
-      "description": "OpenOCD target для вашего чипа",
+      "description": "OpenOCD target for your chip",
       "options": ["stm32f0x", "stm32f1x", "stm32f2x", "stm32f3x", "stm32f4x", "stm32f7x", "stm32g0x", "stm32g4x", "stm32h7x", "stm32l0", "stm32l1"],
       "default": "stm32f4x"
     }

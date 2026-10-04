@@ -1,23 +1,24 @@
 # ============================================================================
-# functions.cmake — все функции платформы, только определения, 0 side-effects
+# functions.cmake - all platform functions, definitions only, 0 side effects
 # ============================================================================
-# include()-ится первым из CMakeLists.txt. Ничего не делает при подключении —
-# просто объявляет функции (в CMake они глобальны сразу после определения, так
-# что видны и из cmsis-download.cmake, и из STM32_Drivers_CPP/CMakeLists.txt).
+# include()'d first from CMakeLists.txt. Does nothing on inclusion - just
+# declares functions (in CMake they are global as soon as defined, so they
+# are visible from cmsis-download.cmake and from STM32_Drivers_CPP/CMakeLists.txt
+# alike).
 #
-#   stm32_read_config()      — project.json -> переменные CFG_* (до project())
-#   stm32_add_firmware()     — собрать один прошиваемый образ
-#   download_one()           — тянет один файл из STM32-base_files, пропускает
-#                              если он уже лежит рядом
-#   stm32_flash_window()     — сектора [START, END) -> адрес начала + длина в байтах
-#   k_to_int()               — "128K" -> 128
-#   stm32_sync_device()      — смена чипа: стереть чужие скачанные файлы + build,
-#                              записать маркер .device
+#   stm32_read_config()      - project.json -> CFG_* variables (before project())
+#   stm32_add_firmware()     - build one flashable image
+#   download_one()           - pulls one file from STM32-base_files, skips it
+#                              if it is already there
+#   stm32_flash_window()     - sectors [START, END) -> origin address + length in bytes
+#   k_to_int()               - "128K" -> 128
+#   stm32_sync_device()      - chip change: wipe stale downloaded files + build,
+#                              write the .device marker
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# _stm32_json_array(CFG KEY OUT)   — внутренняя: JSON-массив CFG[KEY] -> список
-#   Отсутствие ключа / не-массив / пустой массив -> пустой список.
+# _stm32_json_array(CFG KEY OUT)   - internal: JSON array CFG[KEY] -> a list
+#   Missing key / not an array / empty array -> empty list.
 # ---------------------------------------------------------------------------
 function(_stm32_json_array CFG KEY OUT)
 	set(_list "")
@@ -33,14 +34,14 @@ function(_stm32_json_array CFG KEY OUT)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# _stm32_load_json(PATH OUT)   — внутренняя: файл -> строка JSON для string(JSON)
-#   Строки-комментарии (первый непробельный символ — //) вырезаются: string(JSON)
-#   понимает только строгий JSON. Хвостовые комментарии после значения не
-#   поддерживаются, а // внутри строковых значений (URL) не затрагивается.
+# _stm32_load_json(PATH OUT)   - internal: file -> a JSON string for string(JSON)
+#   Whole-line comments (first non-space character is //) are stripped:
+#   string(JSON) only understands strict JSON. Trailing comments after a
+#   value are not supported, and // inside string values (URLs) is left alone.
 # ---------------------------------------------------------------------------
 function(_stm32_load_json PATH OUT)
 	if(NOT EXISTS "${PATH}")
-		message(FATAL_ERROR "нет файла ${PATH}")
+		message(FATAL_ERROR "no such file ${PATH}")
 	endif()
 	file(READ "${PATH}" _j)
 	string(REGEX REPLACE "(^|\n)[ \t]*//[^\n]*" "\\1" _j "${_j}")
@@ -50,57 +51,59 @@ endfunction()
 # ---------------------------------------------------------------------------
 # stm32_read_config(PATH PREFIX)
 #
-# Читает project.json и раскладывает его в переменные ${PREFIX}_* (CFG_* для
-# проекта, BL_* для загрузчика) в области вызывающего. Вызывается ДО project() — часть значений
-# (name/version) нужны самому project().
+# Reads project.json and spreads it into ${PREFIX}_* variables (CFG_* for the
+# project, BL_* for the bootloader) in the caller's scope. Called BEFORE
+# project() - some values (name/version) are needed by project() itself.
 #
-#   CFG_name CFG_version CFG_device     — обязательные, иначе FATAL_ERROR
-#   CFG_heap CFG_stack                  — по умолчанию 0x200 / 0x400
-#   CFG_sources CFG_include_dirs        — списки (могут быть пустыми)
-#   CFG_use_drivers                     — ON/OFF (см. ниже про "drivers")
-#   CFG_drivers                         — список опциональных модулей
-#   CFG_app_start_sector                — "" или N; только для проекта-загрузчика
-#                                         (верхний ключ app_start_sector: образ [0, N))
-#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag,port_sources}
-#                                       — секция "bootloader" (см. ниже)
+#   CFG_name CFG_version CFG_device     - required, FATAL_ERROR otherwise
+#   CFG_heap CFG_stack                  - default to 0x200 / 0x400
+#   CFG_sources CFG_include_dirs        - lists (may be empty)
+#   CFG_use_drivers                     - ON/OFF (see "drivers" below)
+#   CFG_drivers                         - list of optional modules
+#   CFG_app_start_sector                - "" or N; bootloader project only
+#                                         (top-level app_start_sector key: image [0, N))
+#   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag,extra_sources}
+#                                       - the "bootloader" section (see below)
 #
-# "bootloader" в project.json приложения: null / нет ключа — без загрузчика,
-#   прошивка с начала флеша; объект {"app_start_sector": N, "repo": "<git url>",
-#   "tag": "<тег>", "port_sources": [...]} — загрузчик в начале флеша, приложение
-#   — с сектора N (CFG_app_start_sector = N). Загрузчик подключается как
-#   драйверы: клонируется в Bootloader/, файлы берутся из его project.json, его
-#   CMakeLists.txt не используется. В project.json самого загрузчика тот же N
-#   задаётся верхним ключом "app_start_sector".
+# "bootloader" in the application's project.json: null / key absent - no
+#   bootloader, firmware starts at the beginning of flash; an object
+#   {"app_start_sector": N, "repo": "<git url>", "tag": "<tag>",
+#   "extra_sources": [...]} - bootloader at the start of flash, application
+#   starts at sector N (CFG_app_start_sector = N). The bootloader is wired up
+#   the same way as drivers: cloned into Bootloader/, its files come from its
+#   own project.json, its CMakeLists.txt is not used. The bootloader's own
+#   project.json sets the same N through its own top-level "app_start_sector" key.
 #
-#   "port_sources" (необязательно) — файлы ЭТОГО проекта (пути от его
-#   project.json), которые добавляются к сборке образа загрузчика: так плата-
-#   специфичный порт (переопределяет слабые заглушки port_stub.c загрузчика)
-#   пишется в проекте, а репозиторий загрузчика остаётся общим и всегда тянется
-#   как есть, без правок под конкретную плату.
+#   "extra_sources" (optional) - files of THIS project (paths relative to its
+#   own project.json) that get added to the bootloader image build. The
+#   stm32-bootloader repository is a small library (image check, jump,
+#   update flag), with no main() and no contract on "hardware"/protocol -
+#   main() for the bootloader image (and whatever else it needs) is written
+#   by the project, right here.
 #
-# "drivers" в project.json:
-#   нет ключа / null / false  -> драйверы не собираются вообще (CFG_use_drivers OFF)
-#   true                      -> только ядро драйверов (system/rcc/gpio/flash/irq)
-#   []                        -> то же, только ядро
-#   ["UART", "SPI", ...]      -> ядро + перечисленные модули
+# "drivers" in project.json:
+#   key absent / null / false  -> drivers are not built at all (CFG_use_drivers OFF)
+#   true                      -> core drivers only (system/rcc/gpio/flash/irq)
+#   []                        -> same, core only
+#   ["UART", "SPI", ...]      -> core + listed modules
 #
-# Вся проверка конфига — здесь, одним проходом. Формат — данные (JSON), не
-# код: ошибиться и дописать логику в конфиг нельзя. Допускаются строки-
-# комментарии, начинающиеся с // (как в JSONC).
+# All config validation happens here, in one pass. The format is data (JSON),
+# not code: there is no way to slip extra logic into the config by mistake.
+# Whole-line comments starting with // are allowed (as in JSONC).
 # ---------------------------------------------------------------------------
 function(stm32_read_config PATH PREFIX)
 	_stm32_load_json("${PATH}" _cfg)
 
-	# --- обязательные строковые ключи ---
+	# --- required string keys ---
 	foreach(_k name version device)
 		string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" ${_k})
 		if(_e)
-			message(FATAL_ERROR "project.json: нет обязательного ключа '${_k}'")
+			message(FATAL_ERROR "project.json: missing required key '${_k}'")
 		endif()
 		set(${PREFIX}_${_k} "${_v}" PARENT_SCOPE)
 	endforeach()
 
-	# --- heap / stack с умолчаниями ---
+	# --- heap / stack with defaults ---
 	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" heap)
 	if(_e)
 		set(_v "0x200")
@@ -113,11 +116,11 @@ function(stm32_read_config PATH PREFIX)
 	endif()
 	set(${PREFIX}_stack "${_v}" PARENT_SCOPE)
 
-	# --- массивы -> списки ---
+	# --- arrays -> lists ---
 	_stm32_json_array("${_cfg}" sources      _sources)
 	_stm32_json_array("${_cfg}" include_dirs _include_dirs)
 
-	# --- drivers: тристейт (см. шапку функции) ---
+	# --- drivers: tri-state (see the function header) ---
 	string(JSON _dt ERROR_VARIABLE _e TYPE "${_cfg}" drivers)
 	set(${PREFIX}_drivers "" PARENT_SCOPE)
 	set(_use_drivers OFF)
@@ -133,13 +136,14 @@ function(stm32_read_config PATH PREFIX)
 		_stm32_json_array("${_cfg}" drivers _list)
 		set(${PREFIX}_drivers "${_list}" PARENT_SCOPE)
 	else()
-		message(FATAL_ERROR "project.json: \"drivers\" должен быть массивом, true/false или null")
+		message(FATAL_ERROR "project.json: \"drivers\" must be an array, true/false, or null")
 	endif()
 
-	# --- driver_sources: файлы только для сборки с драйверами (загрузчик) ---
+	# --- driver_sources: files built only alongside drivers (bootloader) ---
 	_stm32_json_array("${_cfg}" driver_sources _driver_sources)
 
-	# --- пути в конфиге — от каталога этого project.json; наружу отдаём абсолютные ---
+	# --- paths in the config are relative to this project.json's directory;
+	#     everything handed out is absolute ---
 	get_filename_component(_root "${PATH}" DIRECTORY)
 	foreach(_l _sources _include_dirs _driver_sources)
 		set(_abs "")
@@ -152,7 +156,7 @@ function(stm32_read_config PATH PREFIX)
 	set(${PREFIX}_sources      "${_sources}"      PARENT_SCOPE)
 	set(${PREFIX}_include_dirs "${_include_dirs}" PARENT_SCOPE)
 
-	# --- app_start_sector верхнего уровня: только проект-загрузчик ---
+	# --- top-level app_start_sector: bootloader project only ---
 	set(${PREFIX}_app_start_sector "" PARENT_SCOPE)
 	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" app_start_sector)
 	if(NOT _e AND NOT _t STREQUAL "NULL")
@@ -160,16 +164,16 @@ function(stm32_read_config PATH PREFIX)
 		set(${PREFIX}_app_start_sector "${_v}" PARENT_SCOPE)
 	endif()
 
-	# --- bootloader: null / нет ключа -> без загрузчика; иначе объект ---
+	# --- bootloader: null / key absent -> no bootloader; otherwise an object ---
 	set(${PREFIX}_use_bootloader OFF PARENT_SCOPE)
 	set(${PREFIX}_bootloader_repo "" PARENT_SCOPE)
 	set(${PREFIX}_bootloader_tag  "" PARENT_SCOPE)
-	set(${PREFIX}_bootloader_port_sources "" PARENT_SCOPE)
+	set(${PREFIX}_bootloader_extra_sources "" PARENT_SCOPE)
 	string(JSON _bt ERROR_VARIABLE _e TYPE "${_cfg}" bootloader)
 	if(NOT _e AND _bt STREQUAL "OBJECT")
 		string(JSON _bs ERROR_VARIABLE _e GET "${_cfg}" bootloader app_start_sector)
 		if(_e OR NOT "${_bs}" MATCHES "^[0-9]+$" OR _bs LESS 1)
-			message(FATAL_ERROR "project.json: bootloader.app_start_sector — целое число >= 1 (номер сектора, с которого начинается приложение)")
+			message(FATAL_ERROR "project.json: bootloader.app_start_sector must be an integer >= 1 (the sector number the application starts at)")
 		endif()
 		string(JSON _br ERROR_VARIABLE _e GET "${_cfg}" bootloader repo)
 		if(_e)
@@ -184,59 +188,65 @@ function(stm32_read_config PATH PREFIX)
 		set(${PREFIX}_bootloader_repo "${_br}" PARENT_SCOPE)
 		set(${PREFIX}_bootloader_tag  "${_bg}" PARENT_SCOPE)
 
-		# port_sources: свои файлы этого проекта (порт под конкретную плату — переопределяет
-		# слабые заглушки из port_stub.c), добавляются к сборке ОБРАЗА ЗАГРУЗЧИКА. Так
-		# репозиторий загрузчика остаётся общим и не знает про конкретные платы: он всегда
-		# тянется из репозитория как есть, а плата-специфичный код пишется поверх, в проекте.
+		# extra_sources: this project's own files, added to the build of the
+		# BOOTLOADER image - stm32-bootloader has no main() of its own (a
+		# library: image check, jump, update flag), so main() for the
+		# bootloader image is written in the project and added right here.
 		set(_bps "")
-		string(JSON _bps_t ERROR_VARIABLE _e TYPE "${_cfg}" bootloader port_sources)
+		string(JSON _bps_t ERROR_VARIABLE _e TYPE "${_cfg}" bootloader extra_sources)
 		if(NOT _e AND _bps_t STREQUAL "ARRAY")
-			string(JSON _bps_n LENGTH "${_cfg}" bootloader port_sources)
+			string(JSON _bps_n LENGTH "${_cfg}" bootloader extra_sources)
 			math(EXPR _bps_last "${_bps_n} - 1")
 			foreach(_i RANGE ${_bps_last})
-				string(JSON _r GET "${_cfg}" bootloader port_sources ${_i})
+				string(JSON _r GET "${_cfg}" bootloader extra_sources ${_i})
 				list(APPEND _bps "${_root}/${_r}")
 			endforeach()
 		endif()
-		set(${PREFIX}_bootloader_port_sources "${_bps}" PARENT_SCOPE)
+		set(${PREFIX}_bootloader_extra_sources "${_bps}" PARENT_SCOPE)
 	elseif(NOT _e AND NOT _bt STREQUAL "NULL")
-		message(FATAL_ERROR "project.json: \"bootloader\" должен быть объектом или null")
+		message(FATAL_ERROR "project.json: \"bootloader\" must be an object or null")
 	endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
-# download_one(FILE_NAME BASE_DIR URL_DIR)
+# download_one(FILE_NAME BASE_DIR URL_DIR [OPTIONAL] [REPO_URL_BASE <url>])
 #
-#   FILE_NAME — только имя файла назначения, без пути (напр. "stm32f446xx.h")
-#   BASE_DIR  — каталог назначения, создаётся если его нет
-#   URL_DIR   — путь файла внутри репозитория STM32-base_files, напр.
+#   FILE_NAME - just the destination file name, no path (e.g. "stm32f446xx.h")
+#   BASE_DIR  - destination directory, created if missing
+#   URL_DIR   - the file's path inside the repository, e.g.
 #               "Device/STM32F4xx/Include/stm32f446xx.h"
+#   REPO_URL_BASE - where to download from; defaults to the raw content of
+#               STM32-base_files (master branch). A different repository
+#               (e.g. a single file from STM32_Drivers_CPP by tag - done by
+#               stm32-bootloader in its own CMakeLists.txt, not the platform)
+#               is passed through this argument.
 #
-# Скачивает BASE_DIR/FILE_NAME из STM32-base_files, если его там ещё нет.
-# Четвёртый аргумент OPTIONAL — файл необязательный (напр. SVD, нужен только
-# отладчику): при неудаче выводится предупреждение, а не ошибка конфигурации.
+# Downloads BASE_DIR/FILE_NAME if it is not already there. OPTIONAL - the
+# file is not required (e.g. an SVD, needed only by the debugger): failure
+# produces a warning, not a configuration error.
 #
-# "Уже на месте и непустой" всегда побеждает и никогда не перекачивается — это
-# сознательно, не просто оптимизация. В конечном проекте весь каталог загрузки
-# коммитится в git (vendored, а не в .gitignore), поэтому "уже на месте"
-# обычно значит "положено предыдущей конфигурацией", а не "устаревший мусор".
-# Единственное, что должно форсировать перекачку — смена DEVICE — обрабатывается
-# вызывающей стороной: она удаляет весь каталог загрузки заранее (см.
-# stm32_sync_device()), а не эта функция, гадающая про
-# устаревание каждого файла по отдельности.
+# "Already there and non-empty" always wins and is never re-downloaded - this
+# is deliberate, not just an optimization. In the finished project the whole
+# download directory is committed to git (vendored, not .gitignore'd), so
+# "already there" usually means "placed by a previous configure", not "stale
+# junk". The only thing that should force a re-download - a DEVICE change -
+# is handled by the caller: it wipes the whole download directory beforehand
+# (see stm32_sync_device()), rather than this function guessing at each
+# file's staleness individually.
 # ---------------------------------------------------------------------------
 function(download_one FILE_NAME BASE_DIR URL_DIR)
-	set(_optional FALSE)
-	if("OPTIONAL" IN_LIST ARGN)
-		set(_optional TRUE)
+	cmake_parse_arguments(DL "OPTIONAL" "REPO_URL_BASE" "" ${ARGN})
+	set(_optional ${DL_OPTIONAL})
+	if(NOT DL_REPO_URL_BASE)
+		set(DL_REPO_URL_BASE "https://raw.githubusercontent.com/vsm-stm/STM32-base_files/refs/heads/master/")
 	endif()
 
 	set(DEST "${BASE_DIR}/${FILE_NAME}")
-	set(URL  "https://raw.githubusercontent.com/vsm-stm/STM32-base_files/refs/heads/master/${URL_DIR}")
+	set(URL  "${DL_REPO_URL_BASE}${URL_DIR}")
 
 	message(STATUS "Downloading file: ${FILE_NAME}")
 
-	# Не перекачиваем файл, который уже лежит рядом.
+	# Do not re-download a file that is already sitting next to us.
 	if(EXISTS "${DEST}")
 		file(SIZE "${DEST}" SZ)
 		if(SZ GREATER 0)
@@ -266,9 +276,9 @@ function(download_one FILE_NAME BASE_DIR URL_DIR)
 		message(FATAL_ERROR "Download failed: ${URL}\n${MSG}")
 	endif()
 
-	# Файл в 0 байт — обычно 404, который file(DOWNLOAD) не счёл жёсткой
-	# ошибкой (напр. редирект на HTML-страницу ошибки) — ловим это здесь,
-	# а не молча кладём пустой заголовок.
+	# A 0-byte file is usually a 404 that file(DOWNLOAD) did not treat as a
+	# hard error (e.g. a redirect to an HTML error page) - caught here
+	# instead of silently leaving an empty header in place.
 	file(SIZE "${DEST}" SZ)
 	if(SZ EQUAL 0)
 		file(REMOVE "${DEST}")
@@ -281,8 +291,8 @@ endfunction()
 # ---------------------------------------------------------------------------
 # k_to_int(K_STR OUT)
 #
-# "128K" -> 128 (убирает хвостовую "K", которой размечены таблицы flash/RAM
-# во всех *-map.cmake, чтобы результат можно было скормить в math()).
+# "128K" -> 128 (strips the trailing "K" used throughout every *-map.cmake's
+# flash/RAM tables, so the result can be fed into math()).
 # ---------------------------------------------------------------------------
 function(k_to_int K_STR OUT)
 	string(REPLACE "K" "" _K "${K_STR}")
@@ -292,19 +302,19 @@ endfunction()
 # ---------------------------------------------------------------------------
 # stm32_flash_window(START END OUT_ORIGIN OUT_LENGTH)
 #
-# Окно флеша образа: сектора стирания [START, END) — START включительно, END
-# НЕ включительно (это номер сектора, с которого начинается следующий образ).
+# The image's flash window: erase sectors [START, END) - START inclusive, END
+# NOT inclusive (it is the sector number the NEXT image starts at).
 #
-#   START ""  -> 0                   (с начала флеша)
-#   END   ""  -> число секторов чипа (до конца флеша)
+#   START ""  -> 0                   (from the start of flash)
+#   END   ""  -> chip's sector count (to the end of flash)
 #
-# OUT_ORIGIN <- абсолютный адрес начала сектора START (напр. 0x08010000)
-# OUT_LENGTH <- байт от него до начала сектора END (или до конца флеша)
+# OUT_ORIGIN <- absolute address of the start of sector START (e.g. 0x08010000)
+# OUT_LENGTH <- bytes from there to the start of sector END (or to the end of flash)
 #
-# Читает STM32_FLASH_SECTORS (список "addr;size;addr;size;...", разрешённый в
-# cmsis-download.cmake из скачанной map-таблицы). Конец флеша — адрес плюс размер
-# последнего сектора. Нецелые значения, выход за диапазон и END <= START —
-# ошибка на этапе конфигурации.
+# Reads STM32_FLASH_SECTORS (a list "addr;size;addr;size;...", resolved in
+# cmsis-download.cmake from the downloaded map table). End of flash is the
+# address plus the size of the last sector. Non-integer values, out-of-range
+# sectors, and END <= START are configuration-time errors.
 # ---------------------------------------------------------------------------
 function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 	list(LENGTH STM32_FLASH_SECTORS _n)
@@ -320,30 +330,30 @@ function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 	foreach(_name START END)
 		if(NOT "${${_name}}" MATCHES "^[0-9]+$")
 			message(FATAL_ERROR
-				"stm32_flash_window: ${_name} должен быть целым числом >= 0, "
-				"получено '${${_name}}'")
+				"stm32_flash_window: ${_name} must be an integer >= 0, "
+				"got '${${_name}}'")
 		endif()
 	endforeach()
 	math(EXPR _last "${_count} - 1")
 	if(START GREATER_EQUAL _count)
 		message(FATAL_ERROR
-			"stm32_flash_window: start_sector ${START} вне диапазона - у чипа "
-			"${_count} секторов стирания (номера 0..${_last})")
+			"stm32_flash_window: start_sector ${START} is out of range - the chip "
+			"has ${_count} erase sectors (numbers 0..${_last})")
 	endif()
 	if(END GREATER _count OR NOT END GREATER START)
 		message(FATAL_ERROR
-			"stm32_flash_window: end_sector ${END} недопустим для start_sector "
-			"${START} - нужно ${START} < end_sector <= ${_count} (end_sector не "
-			"включается в образ; ${_count} = до конца флеша)")
+			"stm32_flash_window: end_sector ${END} is invalid for start_sector "
+			"${START} - need ${START} < end_sector <= ${_count} (end_sector is not "
+			"part of the image; ${_count} = to the end of flash)")
 	endif()
 
-	# список плоский: [addr0 size0 addr1 size1 ...], поэтому индекс адреса = N*2
+	# the list is flat: [addr0 size0 addr1 size1 ...], so address index = N*2
 	math(EXPR _si "${START} * 2")
 	list(GET STM32_FLASH_SECTORS ${_si} _origin)
 
 	if(END EQUAL _count)
-		list(GET STM32_FLASH_SECTORS -2 _last_a)   # адрес последнего сектора
-		list(GET STM32_FLASH_SECTORS -1 _last_s)   # размер последнего сектора
+		list(GET STM32_FLASH_SECTORS -2 _last_a)   # address of the last sector
+		list(GET STM32_FLASH_SECTORS -1 _last_s)   # size of the last sector
 		math(EXPR _end_addr "${_last_a} + ${_last_s}")
 	else()
 		math(EXPR _ei "${END} * 2")
@@ -358,20 +368,23 @@ endfunction()
 # ---------------------------------------------------------------------------
 # stm32_sync_device(DEVICE)
 #
-# Следит, чтобы скачанные файлы соответствовали чипу из project.json. Всё, что
-# связано со сменой чипа, — здесь одним местом:
-#   1. читает маркер cmsis-core/download_files/.device (под какой чип скачано);
-#   2. если чип сменился (или файлы лежат без маркера — считаем чужими) —
-#      стирает cmsis-core/download_files/, cmsis-core/drivers_gen/ и
-#      содержимое build-каталога, кроме CMakeCache.txt и CMakeFiles/;
-#   3. записывает маркер с текущим чипом.
+# Keeps the downloaded files in sync with the chip from project.json.
+# Everything related to a chip change lives here, in one place:
+#   1. reads the cmsis-core/download_files/.device marker (which chip the
+#      files were downloaded for);
+#   2. if the chip changed (or the files are sitting there without a marker -
+#      treated as foreign) - wipes cmsis-core/download_files/,
+#      cmsis-core/drivers_gen/, and the build directory's contents except
+#      CMakeCache.txt and CMakeFiles/;
+#   3. writes the marker with the current chip.
 #
-# Маркер лежит рядом с файлами, а не в кеше CMake: скачанное живёт в дереве
-# проекта и переживает удаление build/.
+# The marker sits next to the files, not in the CMake cache: what was
+# downloaded lives in the project tree and survives a build/ wipe.
 #
-# CMakeCache.txt и CMakeFiles/ остаются не потому что их кто-то переиспользует,
-# а потому что функция работает *во время* конфигурации, которой они
-# принадлежат — удалить их из-под идущего прохода сломало бы текущий запуск.
+# CMakeCache.txt and CMakeFiles/ are kept not because anything reuses them,
+# but because this function runs *during* the configure pass they belong to -
+# deleting them out from under the pass in progress would break the current
+# run.
 # ---------------------------------------------------------------------------
 function(stm32_sync_device DEVICE)
 	set(_dl     "${CMAKE_SOURCE_DIR}/cmsis-core/download_files")
@@ -389,7 +402,7 @@ function(stm32_sync_device DEVICE)
 		message(WARNING
 			"STM32 device changed:
 "
-			"  old: ${_old}  (пусто = маркера не было)
+			"  old: ${_old}  (empty = no marker was present)
 "
 			"  new: ${DEVICE}
 "
@@ -417,40 +430,42 @@ endfunction()
 # stm32_add_firmware(TARGET  SOURCES ...  [INCLUDE_DIRS ...]  [LINK ...]
 #                           [START_SECTOR N] [END_SECTOR M])
 #
-# Собирает один прошиваемый образ. Всё общее — флаги cpu/fpu, libc, warnings,
-# линкер-флаги — приходит из таргета stm32_platform (создаётся в CMakeLists.txt);
-# оптимизация и отладка — из пресета (CMAKE_<LANG>_FLAGS_<CONFIG>). Здесь только
-# то, что своё у каждого образа: окно флеша, линкер-скрипт, exe, post-build.
+# Builds one flashable image. Everything shared - cpu/fpu flags, libc,
+# warnings, linker flags - comes from the stm32_platform target (created in
+# CMakeLists.txt); optimization and debug info come from the preset
+# (CMAKE_<LANG>_FLAGS_<CONFIG>). Only what is specific to each image lives
+# here: flash window, linker script, exe, post-build.
 #
-# START_SECTOR — номер сектора стирания, с которого начинать (с 0). Не задан = 0.
-# END_SECTOR   — номер сектора, с которого начинается СЛЕДУЮЩИЙ образ (сам не
-#   входит в этот). Не задан = до конца флеша. Линкер получает FLASH LENGTH строго
-#   по этому окну, поэтому образ, не влезший в свои сектора, — ошибка линковки
-#   (region FLASH overflowed), а не тихое наложение на соседний образ.
-#   Пример: загрузчик START 0 END 4, приложение START 4 (без END).
+# START_SECTOR - the erase-sector number to start at (from 0). Unset = 0.
+# END_SECTOR   - the sector number the NEXT image starts at (not itself part
+#   of this one). Unset = to the end of flash. The linker gets FLASH LENGTH
+#   set strictly to this window, so an image that does not fit its sectors
+#   is a link error (region FLASH overflowed), not a silent overlap with the
+#   neighboring image.
+#   Example: bootloader START 0 END 4, application START 4 (no END).
 #
-# Читает из области верхнего уровня: таргет stm32_platform (CMakeLists.txt) и
-# то, что задаёт cmsis-download.cmake — STM32_LINKER_TEMPLATE,
+# Reads from the top-level scope: the stm32_platform target (CMakeLists.txt)
+# and whatever cmsis-download.cmake sets - STM32_LINKER_TEMPLATE,
 # STM32_STARTUP_SRCS, STM32_FLASH_SECTORS, HEAP_SIZE/STACK_SIZE,
-# RAM_ORIGIN/RAM_LENGTH и переменные областей MEMORY семейства (подставляются
-# в шаблон линкер-скрипта). Поэтому вызывается из той же области, где
-# отработал cmsis-download.cmake, — из CMakeLists.txt.
+# RAM_ORIGIN/RAM_LENGTH, and the family's MEMORY-region variables (substituted
+# into the linker script template). Hence it is called from the same scope
+# where cmsis-download.cmake has already run - from CMakeLists.txt.
 # ---------------------------------------------------------------------------
 function(stm32_add_firmware TARGET)
 	cmake_parse_arguments(FW "" "START_SECTOR;END_SECTOR" "SOURCES;INCLUDE_DIRS;LINK" ${ARGN})
 
-	# --- окно флеша под этот образ ---
+	# --- this image's flash window ---
 	stm32_flash_window("${FW_START_SECTOR}" "${FW_END_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
 
-	# границы окна образа — в исходники (загрузчику нужен адрес, с которого
-	# начинается следующий образ, т.е. приложение: STM32_IMAGE_FLASH_END)
+	# the image window's bounds, into the sources (the bootloader needs the
+	# address the NEXT image - the application - starts at: STM32_IMAGE_FLASH_END)
 	math(EXPR _img_end "${FLASH_ORIGIN} + ${FLASH_LENGTH}" OUTPUT_FORMAT HEXADECIMAL)
 
-	# --- линкер-скрипт под эту цель ---
+	# --- linker script for this target ---
 	set(_ld "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.ld")
 	configure_file("${STM32_LINKER_TEMPLATE}" "${_ld}" @ONLY)
 
-	# --- исполняемый файл ---
+	# --- executable ---
 	add_executable(${TARGET})
 	target_sources(${TARGET} PRIVATE ${FW_SOURCES} ${STM32_STARTUP_SRCS})
 	target_include_directories(${TARGET} PRIVATE ${FW_INCLUDE_DIRS})
@@ -460,7 +475,7 @@ function(stm32_add_firmware TARGET)
 		STM32_IMAGE_FLASH_ORIGIN=${FLASH_ORIGIN}U
 		STM32_IMAGE_FLASH_END=${_img_end}U)
 
-	# --- post-build: размер + .hex / .bin / .dis ---
+	# --- post-build: size + .hex / .bin / .dis ---
 	add_custom_command(TARGET ${TARGET} POST_BUILD
 		COMMAND ${CMAKE_SIZE}    $<TARGET_FILE:${TARGET}>
 		COMMAND ${CMAKE_OBJCOPY} -O ihex   $<TARGET_FILE:${TARGET}> ${TARGET}.hex

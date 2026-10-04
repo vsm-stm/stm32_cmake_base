@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ─── конфиг проекта: project.json -> CFG_* ───────────────────────────────────
+# ─── project config: project.json -> CFG_* ──────────────────────────────────
 include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
 stm32_read_config(${CMAKE_SOURCE_DIR}/project.json CFG)
 
-# ─── тулчейн (только «какой компилятор»; флаги — в stm32_platform и пресетах) ─
+# ─── toolchain (only "which compiler"; flags live in stm32_platform/presets) ─
 if(NOT CMAKE_TOOLCHAIN_FILE)
 	set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/toolchain.cmake"
 		CACHE FILEPATH "STM32 arm-none-eabi toolchain" FORCE)
@@ -22,20 +22,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message(STATUS "Project: ${CFG_name}  Device: ${CFG_device}  Build: ${CMAKE_BUILD_TYPE}")
 
-# ─── скачивание CMSIS/startup/векторов + разбор CFG_device ──────────────────
-#     даёт main_cpu_PARAMS, STM32_*, STM32_LINKER_TEMPLATE, STM32_STARTUP_SRCS,
+# ─── download CMSIS/startup/vectors + parse CFG_device ──────────────────────
+#     provides main_cpu_PARAMS, STM32_*, STM32_LINKER_TEMPLATE, STM32_STARTUP_SRCS,
 #     STM32_FLASH_SECTORS, HEAP_SIZE/STACK_SIZE, RAM_* ...
 include(${CMAKE_SOURCE_DIR}/cmake/cmsis-download.cmake)
 
-# ─── stm32_platform: один INTERFACE-таргет со всеми флагами ──────────────────
-#     линкуют и прошивка (stm32_add_firmware), и stm32_drivers — ни тому, ни
-#     другому не нужно знать про cmsis-core/ или про cpu/fpu чипа.
+# ─── stm32_platform: a single INTERFACE target with every flag ─────────────
+#     linked by both the firmware (stm32_add_firmware) and stm32_drivers -
+#     neither needs to know about cmsis-core/ or the chip's cpu/fpu.
 
-# Здесь только флаги, не зависящие от конфигурации. Оптимизация и отладка
-# (-Og/-O0/-Os, -g*, NDEBUG) задаются в CMakePresets.json через
-# CMAKE_<LANG>_FLAGS_<CONFIG> — по одному пресету на вариант сборки.
+# Only flags that do not depend on the configuration live here. Optimization
+# and debug info (-Og/-O0/-Os, -g*, NDEBUG) come from CMakePresets.json via
+# CMAKE_<LANG>_FLAGS_<CONFIG> - one preset per build variant.
 if(NOT CMAKE_BUILD_TYPE)
-	message(WARNING "CMAKE_BUILD_TYPE не задан — оптимизации нет. Используйте пресет: cmake --preset debug|release|...")
+	message(WARNING "CMAKE_BUILD_TYPE is not set - no optimization. Use a preset: cmake --preset debug|release|...")
 endif()
 
 add_library(stm32_platform INTERFACE)
@@ -45,14 +45,14 @@ target_include_directories(stm32_platform INTERFACE
 	${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include
 )
 target_compile_definitions(stm32_platform INTERFACE
-	${c_target}          # STM32F446xx — под этим именем CMSIS подключает регистры
+	${c_target}          # STM32F446xx - CMSIS includes registers under this name
 	${STM32_DEVICE_UC}   # STM32F446RE
 	${STM32_CORE}        # STM32F4
-	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # для #include STM32_DEVICE_HEADER в коде без драйверов
+	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # for #include STM32_DEVICE_HEADER in code without drivers
 )
 target_compile_options(stm32_platform INTERFACE
-	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu из *-map.cmake
-	-fdata-sections -ffunction-sections            # для -Wl,--gc-sections
+	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu from *-map.cmake
+	-fdata-sections -ffunction-sections            # for -Wl,--gc-sections
 	$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -fno-threadsafe-statics>
 	-Wall -Wextra -Wpedantic -Wno-unused-parameter
 )
@@ -61,22 +61,23 @@ target_link_options(stm32_platform INTERFACE
 	-Wl,--gc-sections
 	--specs=nano.specs --specs=nosys.specs
 	-Wl,--start-group -lc -lm -lstdc++ -lsupc++ -Wl,--end-group
-	-Wl,-z,max-page-size=8              # плотная упаковка секций по адресам
-	-Wl,--wrap=__register_exitproc      # C++ статические деструкторы не нужны без ОС
-	-Wl,--no-warn-rwx-segments          # линкер-скрипты не разносят код/данные по сегментам:
-	                                     # без MMU/MPU биты прав в ELF ни на что не влияют, а
-	                                     # разбивка по сегментам ломается на пустых .data/.ccmram
+	-Wl,-z,max-page-size=8              # pack sections tightly by address
+	-Wl,--wrap=__register_exitproc      # no OS, so no C++ static destructors needed
+	-Wl,--no-warn-rwx-segments          # linker scripts do not separate code/data into segments:
+	                                     # without an MMU/MPU the permission bits in the ELF do
+	                                     # nothing, and splitting into segments breaks on empty
+	                                     # .data/.ccmram
 	-Wl,--print-memory-usage
 )
 
-# ─── драйверы ──────────────────────────────────────────────────────────────
-#     "drivers" в project.json: нет ключа / null / false = не собирать вообще;
-#     true или [] = только ядро; ["UART", ...] = ядро + модули.
-#     1-я конфигурация клонирует в Drivers/, дальше add_subdirectory как есть.
+# ─── drivers ─────────────────────────────────────────────────────────────────
+#     "drivers" in project.json: key absent / null / false = do not build at all;
+#     true or [] = core only; ["UART", ...] = core + modules.
+#     The first configure clones into Drivers/, after that add_subdirectory as-is.
 set(_fw_link "")
 if(CFG_use_drivers)
 	set(STM32_DRIVERS_REQUESTED "${CFG_drivers}" CACHE STRING
-		"Опциональные модули драйверов" FORCE)
+		"Optional driver modules" FORCE)
 	if(EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
 		add_subdirectory(Drivers "${CMAKE_BINARY_DIR}/_deps/drivers-build")
 	else()
@@ -92,16 +93,17 @@ else()
 	message(STATUS "Drivers: disabled (\"drivers\" = null/false/absent in project.json)")
 endif()
 
-# ─── загрузчик (как драйверы) ────────────────────────────────────────────────
-#     "bootloader" в project.json: нет / null — без загрузчика, прошивка с начала
-#     флеша; {"app_start_sector": N, "repo": ..., "tag": ...} — загрузчик в начале
-#     флеша, секторы [0, N), приложение — с сектора N. Всегда тянется из репозитория
-#     (git) в Bootloader/ — правки под конкретный проект сюда не вносятся, они идут
-#     через "bootloader"."port_sources" (см. ниже). Для локальной разработки самого
-#     загрузчика — обычный FetchContent-оверрайд:
-#       -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=<путь к рабочей копии stm32-bootloader>
-#     Его CMakeLists.txt НЕ используется: список файлов берётся из его project.json
-#     (тем же stm32_read_config), сборкой управляет этот файл.
+# ─── bootloader (same pattern as drivers) ────────────────────────────────────
+#     "bootloader" in project.json: absent / null - no bootloader, firmware starts
+#     at the beginning of flash; {"app_start_sector": N, "repo": ..., "tag": ...} -
+#     bootloader at the start of flash, sectors [0, N), application starts at
+#     sector N. Always pulled from a repository (git) into Bootloader/ - no
+#     project-specific edits go there, they go through "bootloader"."extra_sources"
+#     (see below). For local development of the bootloader itself - the usual
+#     FetchContent override:
+#       -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=<path to a working copy of stm32-bootloader>
+#     Its CMakeLists.txt is NOT used: the file list comes from its project.json
+#     (via the same stm32_read_config), this file drives the build.
 if(CFG_use_bootloader)
 	include(FetchContent)
 	FetchContent_Declare(bootloader
@@ -109,32 +111,44 @@ if(CFG_use_bootloader)
 		GIT_REPOSITORY ${CFG_bootloader_repo}
 		GIT_TAG        ${CFG_bootloader_tag}
 		GIT_SHALLOW    TRUE
-		SOURCE_SUBDIR  _no_cmake_here_)   # только клонируем, его CMakeLists не запускаем
+		SOURCE_SUBDIR  _no_cmake_here_)   # clone only, its own CMakeLists is not run
 	FetchContent_MakeAvailable(bootloader)
 	message(STATUS "Bootloader: ${bootloader_SOURCE_DIR}")
 
-	# читаем project.json из ФАКТИЧЕСКОГО каталога (обычно Bootloader/; при
-	# FETCHCONTENT_SOURCE_DIR_BOOTLOADER — путь оверрайда, без клонирования)
+	# read project.json from the ACTUAL directory (normally Bootloader/; with
+	# FETCHCONTENT_SOURCE_DIR_BOOTLOADER - the override path, no cloning)
 	stm32_read_config("${bootloader_SOURCE_DIR}/project.json" BL)
 	set(_bl_sources ${BL_sources})
 	if(CFG_use_drivers)
 		list(APPEND _bl_sources ${BL_driver_sources})
 	endif()
-	# port_sources из "bootloader" в project.json ЭТОГО проекта: плата-специфичный
-	# порт поверх репозитория загрузчика (переопределяет его слабые заглушки)
-	list(APPEND _bl_sources ${CFG_bootloader_port_sources})
+	# extra_sources from "bootloader" in THIS project's project.json: stm32-bootloader
+	# has no main() of its own (a library: image check, jump, update flag, no
+	# contract on "hardware"/protocol) - main() for the bootloader image is
+	# written by the project and added right here.
+	list(APPEND _bl_sources ${CFG_bootloader_extra_sources})
 	stm32_add_firmware(bootloader
 		SOURCES       ${_bl_sources}
-		INCLUDE_DIRS  ${BL_include_dirs}
+		# this project's own include paths too: whatever extra_sources pulls in,
+		# it gets the same headers as the ordinary application image
+		INCLUDE_DIRS  ${BL_include_dirs};${CFG_include_dirs}
 		LINK          ${_fw_link}
 		START_SECTOR  0
 		END_SECTOR    ${CFG_app_start_sector}
 	)
+
+	# The application gets the same bootloader include paths (typically
+	# Bootloader/src) automatically - not just the bootloader itself. This way
+	# files like bl_update_flag.h (the shared "update requested" flag, see
+	# stm32-bootloader) are #include'd from a SINGLE file in the bootloader
+	# repository on both sides, instead of being copy-pasted into the
+	# application: the magic value and its handling live there only.
+	list(APPEND CFG_include_dirs ${BL_include_dirs})
 endif()
 
-# ─── образ прошивки ─────────────────────────────────────────────────────────
-#     окно во флеше: без загрузчика — весь флеш; с загрузчиком — [N, конец);
-#     проект-загрузчик (app_start_sector в его project.json) — [0, N).
+# ─── firmware image ──────────────────────────────────────────────────────────
+#     flash window: no bootloader - the whole flash; with a bootloader - [N, end);
+#     bootloader project itself (app_start_sector in its own project.json) - [0, N).
 set(_sector "")
 if(CFG_use_bootloader)
 	set(_sector START_SECTOR ${CFG_app_start_sector})
