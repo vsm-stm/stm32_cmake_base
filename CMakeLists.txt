@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 # ─── project config: project.json -> CFG_* ──────────────────────────────────
 include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
+stm32_validate_build_directory()
 stm32_read_config(${CMAKE_SOURCE_DIR}/project.json CFG)
 
 # ─── toolchain (only "which compiler"; flags live in stm32_platform/presets) ─
@@ -49,6 +50,7 @@ target_compile_definitions(stm32_platform INTERFACE
 	${STM32_DEVICE_UC}   # STM32F446RE
 	${STM32_CORE}        # STM32F4
 	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # for #include STM32_DEVICE_HEADER in code without drivers
+	$<$<CONFIG:Debug>:DEBUG>
 )
 target_compile_options(stm32_platform INTERFACE
 	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu from *-map.cmake
@@ -122,10 +124,8 @@ if(CFG_use_bootloader)
 	if(CFG_use_drivers)
 		list(APPEND _bl_sources ${BL_driver_sources})
 	endif()
-	# extra_sources from "bootloader" in THIS project's project.json: stm32-bootloader
-	# has no main() of its own (a library: image check, jump, update flag, no
-	# contract on "hardware"/protocol) - main() for the bootloader image is
-	# written by the project and added right here.
+	# extra_sources supplies bl_stay() and its transport/hardware code.
+	# The bootloader's own source list already supplies main().
 	list(APPEND _bl_sources ${CFG_bootloader_extra_sources})
 	stm32_add_firmware(bootloader
 		SOURCES       ${_bl_sources}

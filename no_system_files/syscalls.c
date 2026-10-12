@@ -65,10 +65,15 @@ void _exit (int status)
 __attribute__((weak)) int _read(int file, char *ptr, int len)
 {
 	int DataIdx;
+	if (len < 0 || (len && !ptr)) { errno = EINVAL; return -1; }
+	if (!len) return 0;
+	if (!__io_getchar) { errno = ENOSYS; return -1; }
 
 	for (DataIdx = 0; DataIdx < len; DataIdx++)
 	{
-		*ptr++ = __io_getchar();
+		int ch = __io_getchar();
+		if (ch < 0) return DataIdx;  // EOF/short read; no fabricated bytes
+		*ptr++ = (char)ch;
 	}
 
 return len;
@@ -77,10 +82,16 @@ return len;
 __attribute__((weak)) int _write(int file, char *ptr, int len)
 {
 	int DataIdx;
+	if (len < 0 || (len && !ptr)) { errno = EINVAL; return -1; }
+	if (!len) return 0;
+	if (!__io_putchar) { errno = ENOSYS; return -1; }
 
 	for (DataIdx = 0; DataIdx < len; DataIdx++)
 	{
-		__io_putchar(*ptr++);
+		if (__io_putchar((unsigned char)*ptr++) < 0) {
+			errno = EIO;
+			return DataIdx ? DataIdx : -1;
+		}
 	}
 	return len;
 }

@@ -60,7 +60,7 @@ During `cmake configure`, the project:
    - `startup_common.c`
    - `vector_<device>.c`
    - device headers
-   - `system_<series>.c/.h`
+   - `system_<series>.h`
    - `SVD`
    - the linker script template
 4. Creates the `stm32_platform` target in `CMakeLists.txt` — every compiler
@@ -79,6 +79,85 @@ The `cmsis-core/download_files/.device` marker remembers which chip the files
 were downloaded for. If `"device"` changed (or the files are sitting there
 without a marker), `cmake/cmsis-download.cmake` wipes the downloaded files and
 build artifacts and re-downloads — even after `rm -rf build`.
+
+## Runtime and build contracts
+
+### Dedicated generated directories
+
+`build/<preset>/`, `cmsis-core/download_files/` and `cmsis-core/drivers_gen/`
+contain disposable build/download/generated files only. **Do not put your
+own sources, headers or documents there.** A device change or a platform
+format update removes their contents; CMakeCache.txt/CMakeFiles are retained
+while configure is running. Put your code in src/inc and list it in project.json.
+In-source builds and builds in an ancestor of the source root are rejected.
+
+The platform format is now 2: startup, linker templates and maps must be
+updated together. Older generated/downloaded files are refreshed once on
+configure. The new linker tables use byte counts and names beginning with
+`__stm32_` to avoid collisions with the CMSIS startup ABI.
+
+### Minimal startup and FPU
+
+Startup copies initialized RAM/code and clears zero-initialized sections
+through tables supplied by the linker: .data/.bss, CCM, ITCM, DTCM and SRAM2.
+It sets this image's VTOR where available, keeps IRQ disabled during memory
+initialization/constructors, and enables IRQ immediately before main.
+Returning from main enters a terminal loop.
+
+When `__FPU_PRESENT == 1` and `__FPU_USED == 1`, startup enables access to
+CP10/CP11 through `SCB->CPACR` after RAM initialization. One shared `DSB`/`ISB`
+pair follows FPU/VTOR/core mask configuration before constructors.
+The FPU block is omitted for devices/builds without
+hardware FPU use. Global/static constructors may therefore use float/double;
+FPU access does not depend on calling `System::Init()` from main.
+The drivers retain their FPU initialization for use with other startups.
+The base platform provides no separate FPU initialization API.
+Pre-main constructors must not wait for IRQ-driven work: IRQ is still masked.
+Vendor `system_stm32*.c`, SystemInit and the global CMSIS clock API are not
+used/downloaded. `system_stm32*.h` is retained because device headers include it.
+Use `System::SystemCoreClock` with drivers, or maintain your own clock state.
+
+### Single-bank Flash and dependencies
+
+Only single-bank layouts are supported. F72/F73 use 16/64/128 KiB sectors;
+F74/F75 and single-bank F76/F77 use 32/128/256 KiB sectors. G4 category 3 uses
+4 KiB pages in single-bank mode. Drivers use the same resolved list as the
+firmware linker windows. Set option bytes to the corresponding single-bank
+mode before using sector-based placement/erase; the build does not change
+option bytes. In particular, F76/F77 require nDBANK=1, G4 category 3 DBANK=0,
+and F42/F43 1 MiB parts require DB1M=0.
+
+F4 2 MiB devices (including F429ZI) require dual bank and are rejected rather
+than given a fictitious layout. H7 is unsupported. G0B1/G0C1 are not yet in the
+platform's chip map. Core driver support remains F4/F7/G0.
+
+Every read project.json is a configure dependency; every generated .ld is a
+link dependency. Changing heap/stack followed by build applies the new layout
+without clean rebuild. Debug presets define DEBUG for platform consumers.
+
+For development with these adjacent repositories, use local dependencies:
+
+```powershell
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+```
+
+The base-files override copies from that directory and tracks file changes.
+Remote files remain vendored after the first download. For reproducible
+projects, commit the downloaded files and select a fixed bootloader tag/revision.
+Coordinated changes here and in STM32-base_files/bootloader/drivers must be
+available locally or published upstream before a clean remote configure.
+
+`bootloader.extra_sources: []` adds no extra files. The selected bootloader's
+own sources still build; it needs one user implementation of bl_stay, not
+another main. The updated bootloader supports the F4/F7 PWR interfaces and VTOR;
+use the updated startup to restore IRQ after the jump.
+
+To retarget stdio, define `int __io_putchar(int)` and `int __io_getchar(void)`
+(C linkage from C++), or override the weak _write/_read stubs. Missing hooks
+return ENOSYS; output errors yield EIO/short writes; a negative input result is EOF.
+Do not call malloc/free from IRQ; the supplied heap is not an ISR allocator.
+
+Change details and verification are in [BASE_FIXES.md](BASE_FIXES.md).
 
 ## What this repository is a good fit for
 
@@ -104,7 +183,7 @@ enable. The chip header is included as `#include STM32_DEVICE_HEADER` (the
 define is set by the platform).
 
 A commented-out drivers-based variant is left in the code (`System::Init()`,
-`ClockSystem::Init_calc_pll(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
+`ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
 to enable it, set `"drivers": true` and uncomment the drivers-core includes
 in `inc/main.hpp`.
 
@@ -151,7 +230,7 @@ after a value are not supported. Here is an example without comments:
 }
 ```
 
-- `device` — the full chip part number (`STM32F446RE`, `STM32F429ZI`,
+- `device` — the full chip part number (`STM32F446RE`, `STM32F429ZG`,
   `STM32F407VG`); must match the grammar `cmake/cmsis-download.cmake` understands.
 - `drivers` — whether to pull in the `STM32_Drivers_CPP` library:
   - `null` / `false` / key absent — drivers are not built at all (plain CMSIS + your own code);
@@ -173,8 +252,8 @@ after a value are not supported. Here is an example without comments:
   `Drivers/`) and builds it as a **second image** in this same project: it
   takes the `sources` / `include_dirs` lists from its own `project.json`; its
   `CMakeLists.txt` is not used. `stm32-bootloader` is a small library (image
-  check, jump, update flag) with no `main()` of its own — `extra_sources` IS
-  main() for the bootloader image (and whatever else it needs): files of THIS
+  check, jump, update flag) with its own `main()`. `extra_sources` implements
+  `bl_stay(bl_stay_reason_t)` and its transport/hardware code: files of THIS
   project (paths relative to its own `project.json`) that get added to the
   bootloader image build. Both projects' `include_dirs` are now shared both
   ways: the bootloader sees this project's `include_dirs`, and this project
@@ -239,9 +318,9 @@ Already set up:
 
 - build via the active `CMake` preset (`CMake: Build`);
 - flashing the application via `STM32_Programmer_CLI.exe` over `SWD`
-  (`STM32Prog: Flash app (SWD)`) — finds the `*.elf` in the build directory
-  itself, except `bootloader.elf`, and does not depend on which target CMake
-  Tools has selected as the launch target;
+  (`STM32Prog: Flash app (SWD)`) — flashes the active CMake launch target; with
+  a bootloader, pick the application (not `bootloader`) in the CMake status
+  bar first;
 - flashing the bootloader (`STM32Prog: Flash bootloader (SWD)`) and both
   images in sequence (`Build + Flash all`) — if `bootloader` is set in `project.json`;
 - full chip erase;
@@ -434,7 +513,7 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
    - `startup_common.c`
    - `vector_<device>.c`
    - device headers
-   - `system_<series>.c/.h`
+   - `system_<series>.h`
    - `SVD`
    - шаблон linker script
 4. В `CMakeLists.txt` создаётся таргет `stm32_platform` — все флаги компилятора и линкера в одном месте.
@@ -445,6 +524,83 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
 Драйверы генерируют `flash_config.h` / `irq_registry_config.h` сами (это их внутренние заголовки).
 
 Под какой чип скачаны файлы, запоминает маркер `cmsis-core/download_files/.device`. Если `"device"` изменился (или файлы лежат без маркера), `cmake/cmsis-download.cmake` стирает скачанное и артефакты сборки и качает заново — даже после `rm -rf build`.
+
+## Контракты runtime и сборки
+
+### Каталоги для генерируемых файлов
+
+`build/<preset>/`, `cmsis-core/download_files/` и `cmsis-core/drivers_gen/`
+содержат только удаляемые артефакты сборки, скачанные и генерируемые файлы.
+**Не храните в них свои исходники, заголовки и документы.** При смене MCU
+или формата платформы содержимое удаляется; во время configure сохраняются
+CMakeCache.txt/CMakeFiles. Пользовательский код храните в src/inc и указывайте
+в project.json. Сборка внутри корня исходников и в его родительском каталоге запрещена.
+
+Новый формат платформы — 2: startup, linker templates и maps обновляются
+совместно. Старый набор downloaded/generated files обновляется один раз при
+configure. Linker tables используют размеры в байтах и символы с префиксом
+`__stm32_`, чтобы не конфликтовать с ABI стартапа CMSIS.
+
+### Минимальный startup и FPU
+
+Startup копирует и обнуляет RAM по таблицам линкера: .data/.bss, CCM, ITCM,
+DTCM и SRAM2. Выставляет VTOR текущего образа, если регистр доступен, держит IRQ
+выключенными при инициализации памяти и вызове конструкторов, затем включает
+IRQ непосредственно перед main. Возврат из main заканчивается бесконечным циклом.
+
+При `__FPU_PRESENT == 1` и `__FPU_USED == 1` startup разрешает доступ к
+CP10/CP11 через `SCB->CPACR` после инициализации RAM. Одна общая пара `DSB`/`ISB`
+завершает настройку FPU, VTOR и масок ядра перед вызовом конструкторов.
+На устройствах и в сборках без аппаратного FPU
+этот блок исключается. Поэтому глобальные/статические конструкторы могут
+использовать float/double; доступ к FPU не зависит от вызова `System::Init()`
+из main. Драйверы сохраняют включение FPU для работы с другими startup.
+Базовая платформа не предоставляет отдельного API инициализации FPU.
+Конструкторы до main не должны ожидать работу через IRQ: прерывания ещё закрыты.
+Vendor `system_stm32*.c`, SystemInit и глобальный CMSIS clock API не используются
+и не скачиваются. `system_stm32*.h` сохраняется: его включают device headers.
+Используйте `System::SystemCoreClock` с драйверами либо свой учёт частоты.
+
+### Single-bank Flash и зависимости
+
+Реализованы только single-bank layouts. F72/F73 используют сектора 16/64/128 KiB;
+F74/F75 и single-bank F76/F77 — 32/128/256 KiB. G4 category 3 в single-bank имеет
+страницы 4 KiB. Драйверы используют ту же карту, что linker windows.
+До размещения/стирания по номерам секторов option bytes должны соответствовать
+single-bank: F76/F77 — nDBANK=1, G4 category 3 — DBANK=0, F42/F43 1 MiB — DB1M=0.
+Сборка сама option bytes не меняет.
+
+F4 с 2 MiB Flash, включая F429ZI, требуют dual-bank и отклоняются при configure.
+H7 не поддерживается. G0B1/G0C1 пока отсутствуют в карте чипов платформы.
+Поддержка ядра драйверов остаётся F4/F7/G0.
+
+Каждый прочитанный project.json вызывает reconfigure при изменении.
+Каждый сгенерированный .ld является зависимостью линковки: heap/stack применяются
+обычной сборкой без clean rebuild. Debug presets определяют DEBUG для потребителей платформы.
+
+При разработке с соседними репозиториями доступны локальные зависимости:
+
+```powershell
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+```
+
+Локальный base-files override отслеживает изменения файлов; удалённые файлы
+сохраняются после первой загрузки. Для повторяемости коммитьте скачанные файлы
+и выбирайте фиксированный tag/revision загрузчика. Согласованные изменения
+платформы/base_files/bootloader/drivers должны быть доступны локально либо
+опубликованы upstream до чистой конфигурации через сеть.
+
+`bootloader.extra_sources: []` ничего не добавляет. Исходники самого загрузчика
+собираются; проект предоставляет одну реализацию bl_stay, а не второй main.
+Обновлённый загрузчик учитывает PWR F4/F7 и переносит VTOR; обновлённый startup
+восстанавливает IRQ после перехода.
+
+Для stdio определите `int __io_putchar(int)` и `int __io_getchar(void)`
+(C linkage из C++) либо переопределите weak _write/_read. Без hooks возвращается
+ENOSYS; ошибка вывода даёт EIO/short write; отрицательный ввод означает EOF.
+Не вызывайте malloc/free из IRQ: поставляемая куча не предназначена для этого.
+
+Описание изменений и проверок: [BASE_FIXES.md](BASE_FIXES.md).
 
 ## Для какого сценария подходит репозиторий
 
@@ -466,7 +622,7 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
 
 Пример написан под F4; на другом семействе замените включение тактирования порта. Заголовок чипа подключается как `#include STM32_DEVICE_HEADER` (define задаёт платформа).
 
-В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::Init_calc_pll(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
+В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
 
 ## Требования
 
@@ -508,7 +664,7 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
 }
 ```
 
-- `device` — полный код чипа (`STM32F446RE`, `STM32F429ZI`, `STM32F407VG`); должен совпадать с грамматикой, которую понимает `cmake/cmsis-download.cmake`.
+- `device` — полный код чипа (`STM32F446RE`, `STM32F429ZG`, `STM32F407VG`); должен совпадать с грамматикой, которую понимает `cmake/cmsis-download.cmake`.
 - `drivers` — подключение библиотеки `STM32_Drivers_CPP`:
   - `null` / `false` / ключ отсутствует — драйверы не собираются вообще (голый CMSIS + свой код);
   - `true` или `[]` — только ядро (system / rcc / gpio / flash / irq_registry);
@@ -516,7 +672,7 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
 
   Драйверы поддерживают STM32 **F4 / F7 / G0**. Для остальных семейств (в т.ч. G4) ставьте `null` и пишите под регистры сами, либо портируйте драйверы.
 - `sources` / `include_dirs` — ваш код и include-пути.
-- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), без собственного `main()` — `extra_sources` это и есть main() для образа загрузчика (и всё, что ему нужно): файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
+- `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), с собственным `main()` — `extra_sources` добавляет реализацию `bl_stay(bl_stay_reason_t)` и её transport/hardware код: файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
 Автономный загрузчик (`stm32-bootloader`) скачивает файлы этой платформы (`cmake/`, `no_system_files/`, `cmsis-core/Include`) в своё дерево и запускает тот же сценарий; в его `project.json` верхний ключ `app_start_sector` задаёт `[0, N)`. Определение `STM32_DEVICE_HEADER` (`"stm32f4xx.h"`) позволяет коду без драйверов писать `#include STM32_DEVICE_HEADER`.
 
@@ -564,7 +720,7 @@ build/<preset>/
 Что уже настроено:
 
 - сборка через активный `CMake` preset (`CMake: Build`);
-- прошивка приложения через `STM32_Programmer_CLI.exe` по `SWD` (`STM32Prog: Flash app (SWD)`) — находит `*.elf` в каталоге сборки сама, кроме `bootloader.elf`, и не зависит от того, какая цель выбрана в CMake Tools как launch target;
+- прошивка приложения через `STM32_Programmer_CLI.exe` по `SWD` (`STM32Prog: Flash app (SWD)`) — прошивает активную launch target CMake; с загрузчиком сначала выберите приложение (не `bootloader`) в строке состояния CMake;
 - прошивка загрузчика (`STM32Prog: Flash bootloader (SWD)`) и обоих образов подряд (`Build + Flash all`) — если в `project.json` задан `bootloader`;
 - полное стирание чипа;
 - отладка через `cortex-debug`: `ST-Link Launch` / `ST-Link Attach` (штатный GDB-сервер ST-Link), `ST-Link-OCD` / `ST-Link-OCD-SWO` (OpenOCD, семейство выбирается при запуске; SWO — вывод трассировки), `VS_Launch` (расширение ST для VS Code);

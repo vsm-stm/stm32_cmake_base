@@ -18,15 +18,31 @@
 
 # ---------------------------------------------------------------------------
 # _stm32_json_array(CFG KEY OUT)   - internal: JSON array CFG[KEY] -> a list
-#   Missing key / not an array / empty array -> empty list.
+#   Missing key / null / empty array -> empty list; other types are errors.
+#   KEY may be a list of JSON path components (e.g. bootloader;extra_sources).
 # ---------------------------------------------------------------------------
 function(_stm32_json_array CFG KEY OUT)
 	set(_list "")
-	string(JSON _n ERROR_VARIABLE _e LENGTH "${CFG}" ${KEY})
-	if(NOT _e AND _n GREATER 0)
+	string(JSON _type ERROR_VARIABLE _e TYPE "${CFG}" ${KEY})
+	if(_e OR _type STREQUAL "NULL")
+		set(${OUT} "" PARENT_SCOPE)
+		return()
+	endif()
+	if(NOT _type STREQUAL "ARRAY")
+		message(FATAL_ERROR "${_stm32_config_path}: '${KEY}' must be an array of strings")
+	endif()
+	string(JSON _n LENGTH "${CFG}" ${KEY})
+	if(_n GREATER 0)
 		math(EXPR _last "${_n} - 1")
 		foreach(_i RANGE ${_last})
+			string(JSON _item_type TYPE "${CFG}" ${KEY} ${_i})
+			if(NOT _item_type STREQUAL "STRING")
+				message(FATAL_ERROR "${_stm32_config_path}: '${KEY}[${_i}]' must be a string")
+			endif()
 			string(JSON _item GET "${CFG}" ${KEY} ${_i})
+			if(_item STREQUAL "" OR _item MATCHES ";")
+				message(FATAL_ERROR "${_stm32_config_path}: '${KEY}[${_i}]' must be nonempty and contain no semicolon")
+			endif()
 			list(APPEND _list "${_item}")
 		endforeach()
 	endif()
@@ -44,6 +60,8 @@ function(_stm32_load_json PATH OUT)
 		message(FATAL_ERROR "no such file ${PATH}")
 	endif()
 	file(READ "${PATH}" _j)
+	# JSON files are inputs just like included CMake files.
+	set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${PATH}")
 	string(REGEX REPLACE "(^|\n)[ \t]*//[^\n]*" "\\1" _j "${_j}")
 	set(${OUT} "${_j}" PARENT_SCOPE)
 endfunction()
@@ -77,9 +95,8 @@ endfunction()
 #   "extra_sources" (optional) - files of THIS project (paths relative to its
 #   own project.json) that get added to the bootloader image build. The
 #   stm32-bootloader repository is a small library (image check, jump,
-#   update flag), with no main() and no contract on "hardware"/protocol -
-#   main() for the bootloader image (and whatever else it needs) is written
-#   by the project, right here.
+#   update flag), with its own main(). The project provides bl_stay() and
+#   whatever transport/hardware code that function needs.
 #
 # "drivers" in project.json:
 #   key absent / null / false  -> drivers are not built at all (CFG_use_drivers OFF)
@@ -92,29 +109,63 @@ endfunction()
 # Whole-line comments starting with // are allowed (as in JSONC).
 # ---------------------------------------------------------------------------
 function(stm32_read_config PATH PREFIX)
+	get_filename_component(PATH "${PATH}" ABSOLUTE)
+	set(_stm32_config_path "${PATH}")
 	_stm32_load_json("${PATH}" _cfg)
+	string(JSON _root_type ERROR_VARIABLE _json_error TYPE "${_cfg}")
+	if(_json_error OR NOT _root_type STREQUAL "OBJECT")
+		message(FATAL_ERROR "${PATH}: configuration must be a JSON object (${_json_error})")
+	endif()
 
 	# --- required string keys ---
 	foreach(_k name version device)
-		string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" ${_k})
-		if(_e)
-			message(FATAL_ERROR "project.json: missing required key '${_k}'")
+		string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" ${_k})
+		if(_e OR NOT _t STREQUAL "STRING")
+			message(FATAL_ERROR "${PATH}: '${_k}' must be a nonempty string")
 		endif()
+		string(JSON _v GET "${_cfg}" ${_k})
+		if(_v STREQUAL "")
+			message(FATAL_ERROR "${PATH}: '${_k}' must be a nonempty string")
+		endif()
+		set(_${_k} "${_v}")
 		set(${PREFIX}_${_k} "${_v}" PARENT_SCOPE)
 	endforeach()
+	if(NOT _name MATCHES "^[A-Za-z_][A-Za-z0-9_.-]*$")
+		message(FATAL_ERROR "${PATH}: 'name' is not a valid firmware target name")
+	endif()
+	if(_name STREQUAL "stm32_platform" OR _name STREQUAL "stm32_drivers")
+		message(FATAL_ERROR "${PATH}: 'name' conflicts with a platform target")
+	endif()
+	if(NOT _version MATCHES "^[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?(\\.[0-9]+)?$")
+		message(FATAL_ERROR "${PATH}: 'version' must have one to four numeric components")
+	endif()
 
 	# --- heap / stack with defaults ---
-	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" heap)
-	if(_e)
-		set(_v "0x200")
-	endif()
-	set(${PREFIX}_heap "${_v}" PARENT_SCOPE)
-
-	string(JSON _v ERROR_VARIABLE _e GET "${_cfg}" stack)
-	if(_e)
-		set(_v "0x400")
-	endif()
-	set(${PREFIX}_stack "${_v}" PARENT_SCOPE)
+	foreach(_k heap stack)
+		string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" ${_k})
+		if(_e OR _t STREQUAL "NULL")
+			if(_k STREQUAL "heap")
+				set(_v "0x200")
+			else()
+				set(_v "0x400")
+			endif()
+		elseif(_t STREQUAL "STRING" OR _t STREQUAL "NUMBER")
+			string(JSON _v GET "${_cfg}" ${_k})
+		else()
+			message(FATAL_ERROR "${PATH}: '${_k}' must be an unsigned integer")
+		endif()
+		if(NOT _v MATCHES "^(0[xX][0-9A-Fa-f]+|[0-9]+)$")
+			message(FATAL_ERROR "${PATH}: '${_k}' must be an unsigned integer")
+		endif()
+		math(EXPR _bytes "${_v}")
+		if(_bytes LESS 0 OR _bytes GREATER 4294967295)
+			message(FATAL_ERROR "${PATH}: '${_k}' is outside the 32-bit size range")
+		endif()
+		if(_k STREQUAL "stack" AND _bytes EQUAL 0)
+			message(FATAL_ERROR "${PATH}: 'stack' must be greater than zero")
+		endif()
+		set(${PREFIX}_${_k} "${_bytes}" PARENT_SCOPE)
+	endforeach()
 
 	# --- arrays -> lists ---
 	_stm32_json_array("${_cfg}" sources      _sources)
@@ -123,20 +174,17 @@ function(stm32_read_config PATH PREFIX)
 	# --- drivers: tri-state (see the function header) ---
 	string(JSON _dt ERROR_VARIABLE _e TYPE "${_cfg}" drivers)
 	set(${PREFIX}_drivers "" PARENT_SCOPE)
-	set(_use_drivers OFF)
 	if(_e OR _dt STREQUAL "NULL")
 		set(${PREFIX}_use_drivers OFF PARENT_SCOPE)
 	elseif(_dt STREQUAL "BOOLEAN")
 		string(JSON _dv GET "${_cfg}" drivers)
-		set(_use_drivers "${_dv}")
 		set(${PREFIX}_use_drivers "${_dv}" PARENT_SCOPE)
 	elseif(_dt STREQUAL "ARRAY")
-		set(_use_drivers ON)
 		set(${PREFIX}_use_drivers ON PARENT_SCOPE)
 		_stm32_json_array("${_cfg}" drivers _list)
 		set(${PREFIX}_drivers "${_list}" PARENT_SCOPE)
 	else()
-		message(FATAL_ERROR "project.json: \"drivers\" must be an array, true/false, or null")
+		message(FATAL_ERROR "${PATH}: 'drivers' must be an array, true/false, or null")
 	endif()
 
 	# --- driver_sources: files built only alongside drivers (bootloader) ---
@@ -148,7 +196,8 @@ function(stm32_read_config PATH PREFIX)
 	foreach(_l _sources _include_dirs _driver_sources)
 		set(_abs "")
 		foreach(_r ${${_l}})
-			list(APPEND _abs "${_root}/${_r}")
+			get_filename_component(_r "${_r}" ABSOLUTE BASE_DIR "${_root}")
+			list(APPEND _abs "${_r}")
 		endforeach()
 		set(${_l} "${_abs}")
 	endforeach()
@@ -161,6 +210,9 @@ function(stm32_read_config PATH PREFIX)
 	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" app_start_sector)
 	if(NOT _e AND NOT _t STREQUAL "NULL")
 		string(JSON _v GET "${_cfg}" app_start_sector)
+		if(NOT _t STREQUAL "NUMBER" OR NOT _v MATCHES "^[0-9]+$" OR _v LESS 1)
+			message(FATAL_ERROR "${PATH}: 'app_start_sector' must be an integer >= 1")
+		endif()
 		set(${PREFIX}_app_start_sector "${_v}" PARENT_SCOPE)
 	endif()
 
@@ -171,9 +223,13 @@ function(stm32_read_config PATH PREFIX)
 	set(${PREFIX}_bootloader_extra_sources "" PARENT_SCOPE)
 	string(JSON _bt ERROR_VARIABLE _e TYPE "${_cfg}" bootloader)
 	if(NOT _e AND _bt STREQUAL "OBJECT")
+		if(_name STREQUAL "bootloader")
+			message(FATAL_ERROR "${PATH}: application name 'bootloader' conflicts with the bootloader target")
+		endif()
+		string(JSON _bs_type ERROR_VARIABLE _e TYPE "${_cfg}" bootloader app_start_sector)
 		string(JSON _bs ERROR_VARIABLE _e GET "${_cfg}" bootloader app_start_sector)
-		if(_e OR NOT "${_bs}" MATCHES "^[0-9]+$" OR _bs LESS 1)
-			message(FATAL_ERROR "project.json: bootloader.app_start_sector must be an integer >= 1 (the sector number the application starts at)")
+		if(_e OR NOT _bs_type STREQUAL "NUMBER" OR NOT "${_bs}" MATCHES "^[0-9]+$" OR _bs LESS 1)
+			message(FATAL_ERROR "${PATH}: 'bootloader.app_start_sector' must be an integer >= 1")
 		endif()
 		string(JSON _br ERROR_VARIABLE _e GET "${_cfg}" bootloader repo)
 		if(_e)
@@ -183,28 +239,31 @@ function(stm32_read_config PATH PREFIX)
 		if(_e)
 			set(_bg "main")
 		endif()
+		foreach(_key repo tag)
+			string(JSON _type ERROR_VARIABLE _err TYPE "${_cfg}" bootloader ${_key})
+			if(NOT _err)
+				string(JSON _value GET "${_cfg}" bootloader ${_key})
+				if(NOT _type STREQUAL "STRING" OR _value STREQUAL "")
+					message(FATAL_ERROR "${PATH}: 'bootloader.${_key}' must be a nonempty string")
+				endif()
+			endif()
+		endforeach()
 		set(${PREFIX}_use_bootloader ON PARENT_SCOPE)
 		set(${PREFIX}_app_start_sector "${_bs}" PARENT_SCOPE)
 		set(${PREFIX}_bootloader_repo "${_br}" PARENT_SCOPE)
 		set(${PREFIX}_bootloader_tag  "${_bg}" PARENT_SCOPE)
 
-		# extra_sources: this project's own files, added to the build of the
-		# BOOTLOADER image - stm32-bootloader has no main() of its own (a
-		# library: image check, jump, update flag), so main() for the
-		# bootloader image is written in the project and added right here.
+		# Empty/missing extra_sources contributes no files. main() is in the
+		# dependency; these files normally implement bl_stay().
+		_stm32_json_array("${_cfg}" "bootloader;extra_sources" _extras)
 		set(_bps "")
-		string(JSON _bps_t ERROR_VARIABLE _e TYPE "${_cfg}" bootloader extra_sources)
-		if(NOT _e AND _bps_t STREQUAL "ARRAY")
-			string(JSON _bps_n LENGTH "${_cfg}" bootloader extra_sources)
-			math(EXPR _bps_last "${_bps_n} - 1")
-			foreach(_i RANGE ${_bps_last})
-				string(JSON _r GET "${_cfg}" bootloader extra_sources ${_i})
-				list(APPEND _bps "${_root}/${_r}")
-			endforeach()
-		endif()
+		foreach(_r IN LISTS _extras)
+			get_filename_component(_r "${_r}" ABSOLUTE BASE_DIR "${_root}")
+			list(APPEND _bps "${_r}")
+		endforeach()
 		set(${PREFIX}_bootloader_extra_sources "${_bps}" PARENT_SCOPE)
 	elseif(NOT _e AND NOT _bt STREQUAL "NULL")
-		message(FATAL_ERROR "project.json: \"bootloader\" must be an object or null")
+		message(FATAL_ERROR "${PATH}: 'bootloader' must be an object or null")
 	endif()
 endfunction()
 
@@ -225,19 +284,22 @@ endfunction()
 # file is not required (e.g. an SVD, needed only by the debugger): failure
 # produces a warning, not a configuration error.
 #
-# "Already there and non-empty" always wins and is never re-downloaded - this
+# In remote mode, "already there and non-empty" wins and is not re-downloaded - this
 # is deliberate, not just an optimization. In the finished project the whole
 # download directory is committed to git (vendored, not .gitignore'd), so
 # "already there" usually means "placed by a previous configure", not "stale
 # junk". The only thing that should force a re-download - a DEVICE change -
-# is handled by the caller: it wipes the whole download directory beforehand
+# is handled by the caller: MCU/runtime format changes wipe the download directory
 # (see stm32_sync_device()), rather than this function guessing at each
-# file's staleness individually.
+# file's staleness individually. STM32_BASE_FILES_DIR instead tracks a local
+# checkout with configure_file(COPYONLY) and configuration dependencies.
 # ---------------------------------------------------------------------------
 function(download_one FILE_NAME BASE_DIR URL_DIR)
 	cmake_parse_arguments(DL "OPTIONAL" "REPO_URL_BASE" "" ${ARGN})
 	set(_optional ${DL_OPTIONAL})
+	set(_from_base_files OFF)
 	if(NOT DL_REPO_URL_BASE)
+		set(_from_base_files ON)
 		set(DL_REPO_URL_BASE "https://raw.githubusercontent.com/vsm-stm/STM32-base_files/refs/heads/master/")
 	endif()
 
@@ -246,7 +308,26 @@ function(download_one FILE_NAME BASE_DIR URL_DIR)
 
 	message(STATUS "Downloading file: ${FILE_NAME}")
 
-	# Do not re-download a file that is already sitting next to us.
+	file(MAKE_DIRECTORY "${BASE_DIR}")
+	# Development/vendor override; explicit alternate repositories (e.g. CRC)
+	# keep using their own REPO_URL_BASE. No network fallback for missing files.
+	if(STM32_BASE_FILES_DIR AND _from_base_files)
+		get_filename_component(_local_root "${STM32_BASE_FILES_DIR}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+		set(_local_file "${_local_root}/${URL_DIR}")
+		if(EXISTS "${_local_file}")
+			file(SIZE "${_local_file}" _size)
+			if(_size GREATER 0)
+				configure_file("${_local_file}" "${DEST}" COPYONLY)
+				return()
+			endif()
+		endif()
+		if(_optional)
+			message(WARNING "Optional base file not available: ${_local_file}")
+			return()
+		endif()
+		message(FATAL_ERROR "Missing/empty local base file: ${_local_file}")
+	endif()
+	# Remote files are vendored once; a local override tracks its source files.
 	if(EXISTS "${DEST}")
 		file(SIZE "${DEST}" SZ)
 		if(SZ GREATER 0)
@@ -255,13 +336,13 @@ function(download_one FILE_NAME BASE_DIR URL_DIR)
 		endif()
 	endif()
 
-	file(MAKE_DIRECTORY "${BASE_DIR}")
-
 	file(DOWNLOAD
 		"${URL}"
 		"${DEST}"
 		STATUS RES
 		TLS_VERIFY ON
+		TIMEOUT 60
+		INACTIVITY_TIMEOUT 15
 	)
 
 	list(GET RES 0 CODE)
@@ -387,8 +468,15 @@ endfunction()
 # run.
 # ---------------------------------------------------------------------------
 function(stm32_sync_device DEVICE)
+	stm32_validate_build_directory()
 	set(_dl     "${CMAKE_SOURCE_DIR}/cmsis-core/download_files")
 	set(_marker "${_dl}/.device")
+	set(_format_marker "${_dl}/.platform-format")
+	set(_format "")
+	if(EXISTS "${_format_marker}")
+		file(READ "${_format_marker}" _format)
+		string(STRIP "${_format}" _format)
+	endif()
 
 	set(_old "")
 	if(EXISTS "${_marker}")
@@ -398,9 +486,9 @@ function(stm32_sync_device DEVICE)
 
 	if(_old STREQUAL "" AND NOT EXISTS "${_dl}")
 		message(STATUS "Initial STM32 configuration for device: ${DEVICE}")
-	elseif(NOT _old STREQUAL DEVICE)
+	elseif(NOT _old STREQUAL DEVICE OR NOT _format STREQUAL "2")
 		message(WARNING
-			"STM32 device changed:
+			"STM32 device/platform format changed (runtime format ${_format} -> 2):
 "
 			"  old: ${_old}  (empty = no marker was present)
 "
@@ -424,6 +512,22 @@ function(stm32_sync_device DEVICE)
 	file(MAKE_DIRECTORY "${_dl}")
 	file(WRITE "${_marker}" "${DEVICE}
 ")
+	file(WRITE "${_format_marker}" "2\n")
+endfunction()
+
+# Build/download/generated directories contain disposable artifacts only.
+# In-source or ancestor builds would include the project's own source files.
+function(stm32_validate_build_directory)
+	file(REAL_PATH "${CMAKE_SOURCE_DIR}" _source)
+	file(REAL_PATH "${CMAKE_BINARY_DIR}" _binary)
+	if(CMAKE_HOST_WIN32)
+		string(TOLOWER "${_source}" _source)
+		string(TOLOWER "${_binary}" _binary)
+	endif()
+	cmake_path(IS_PREFIX _binary "${_source}" NORMALIZE _contains_source)
+	if(_contains_source)
+		message(FATAL_ERROR "Use a dedicated build directory outside the source root (for example build/debug). Build directories are cleaned on MCU changes.")
+	endif()
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -471,6 +575,7 @@ function(stm32_add_firmware TARGET)
 	target_include_directories(${TARGET} PRIVATE ${FW_INCLUDE_DIRS})
 	target_link_libraries(${TARGET} PRIVATE stm32_platform ${FW_LINK})
 	target_link_options(${TARGET} PRIVATE -T${_ld} -Wl,-Map=${TARGET}.map)
+	set_property(TARGET ${TARGET} APPEND PROPERTY LINK_DEPENDS "${_ld}")
 	target_compile_definitions(${TARGET} PRIVATE
 		STM32_IMAGE_FLASH_ORIGIN=${FLASH_ORIGIN}U
 		STM32_IMAGE_FLASH_END=${_img_end}U)

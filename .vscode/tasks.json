@@ -66,23 +66,24 @@
       "detail": "List available STM32 programmer interfaces"
     },
 
-    // The application - the one .elf in the build directory that is not bootloader.elf.
-    // Does not depend on whichever target CMake Tools has selected as the "launch
-    // target" (easy to get wrong - "Flash project" would then silently flash the
-    // wrong thing; see STM32Prog: Flash bootloader).
+    // The application image - the active CMake launch target. With a bootloader,
+    // CMake Tools has two targets ("bootloader" and the app); pick the app in the
+    // CMake status bar before running this, otherwise it flashes whatever is
+    // currently selected.
     {
       "type": "shell",
       "label": "STM32Prog: Flash app (SWD)",
-      "command": "powershell",
+      "command": "STM32_Programmer_CLI.exe",
       "args": [
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-        "$f = Get-ChildItem -Path '${workspaceFolder}/build/${command:cmake.activeConfigurePresetName}' -Filter *.elf | Where-Object { $_.Name -ne 'bootloader.elf' } | Select-Object -First 1 -ExpandProperty FullName; if (-not $f) { Write-Error 'app .elf not found — build first'; exit 1 }; & STM32_Programmer_CLI.exe --connect port=swd --download $f --start"
+        "--connect", "port=swd",
+        "--download", "${command:cmake.launchTargetPath}",
+        "--start"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
       },
       "problemMatcher": [],
-      "detail": "Flash the application image (any *.elf except bootloader.elf) via SWD and start execution"
+      "detail": "Flash the active CMake launch target via SWD and start execution"
     },
 
     {

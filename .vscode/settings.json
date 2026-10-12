@@ -51,7 +51,7 @@
     {
       "label": "$(desktop-download) Flash App",
       "task": "STM32Prog: Flash app (SWD)",
-      "tooltip": "Flash the application (any *.elf except bootloader.elf) via SWD and start it"
+      "tooltip": "Flash the active CMake launch target via SWD and start it"
     },
     {
       "label": "$(refresh) Reset",
