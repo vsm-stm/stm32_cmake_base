@@ -7,6 +7,9 @@
 
 	// full chip part number, e.g. STM32F446RE, STM32F429ZG, STM32G474RE (single-bank)
 	"device":       "STM32f446ret",
+	// Flash bank mode: null/absent = fixed device mode, or single if switchable.
+	// Set single/dual to require a specific mode; option bytes are checked by Flash init.
+	"flash_bank_mode": null,
 	// heap and stack size for the linker script (default 0x200 / 0x400)
 	"heap":         "0x200",
 	"stack":        "0x400",

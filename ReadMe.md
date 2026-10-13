@@ -120,19 +120,53 @@ Vendor `system_stm32*.c`, SystemInit and the global CMSIS clock API are not
 used/downloaded. `system_stm32*.h` is retained because device headers include it.
 Use `System::SystemCoreClock` with drivers, or maintain your own clock state.
 
-### Single-bank Flash and dependencies
+### Flash bank modes and dependencies
 
-Only single-bank layouts are supported. F72/F73 use 16/64/128 KiB sectors;
-F74/F75 and single-bank F76/F77 use 32/128/256 KiB sectors. G4 category 3 uses
-4 KiB pages in single-bank mode. Drivers use the same resolved list as the
-firmware linker windows. Set option bytes to the corresponding single-bank
-mode before using sector-based placement/erase; the build does not change
-option bytes. In particular, F76/F77 require nDBANK=1, G4 category 3 DBANK=0,
-and F42/F43 1 MiB parts require DB1M=0.
+`flash_bank_mode` accepts `"single"` / `"dual"`. Missing/null selects the fixed
+mode on single-only/dual-only devices; switchable devices default to single.
+Unsupported explicit modes are configuration errors. F429ZI (2 MiB) therefore
+uses both banks automatically. The base and driver share the same resolved
+format-3 erase map: address, size, bank and hardware erase selector.
 
-F4 2 MiB devices (including F429ZI) require dual bank and are rejected rather
-than given a fictitious layout. H7 is unsupported. G0B1/G0C1 are not yet in the
-platform's chip map. Core driver support remains F4/F7/G0.
+The device table's `FLASH_LAYOUT` column selects the shared geometry directly.
+Supported modes are determined by the presence of single/dual erase lists;
+there are no separate device-to-layout or supported-mode tables.
+
+F4 1 MiB bank-capable variants use DB1M; F76/F77 use nDBANK; G0B1/C1 256 KiB
+use DUAL_BANK. The Flash driver checks the actual mode during initialization
+and returns SysInitStatus::InitError on mismatch or active bank swap. Fixed
+modes ignore irrelevant option bits. Programming option bytes remains the
+user's responsibility; reset the MCU after changing them. With drivers disabled,
+the CMSIS application must check its own hardware configuration.
+
+For G4 category 3, single pages are 4 KiB and dual pages 2 KiB. The 128/256 KiB
+dual variants have an address gap before bank 2 at 0x08040000. Ordinary code,
+constants and RAM initializers stay in the first contiguous bank of the selected
+image window; `.flash_bank2` explicitly places const data or functions in the
+available second bank. The linker excludes the gap and limits both regions to
+the image's sector window. The logical `app_start_sector` indexes the erase map,
+including bank 2; it is not the hardware erase selector.
+
+```cpp
+__attribute__((section(".flash_bank2"))) const uint32_t table[16] = {1, 2, 3};
+```
+
+Contiguous single/dual layouts use the ordinary single `FLASH` region. Only
+G4 layouts with a gap add `FLASH_BANK2` and the explicit `.flash_bank2` section.
+ELF/HEX retain both regions' addresses. The usual BIN generation is unchanged;
+if both regions contain data, BIN includes padding across the address gap.
+No separate bank-2 binary is generated.
+
+G0B0/B1/C1 and L071/L072/L073 category-5 variants are now in the maps. Flash driver
+support remains F4/F7/G0. H7 erase maps are updated (including H7A3/B3 8 KiB pages),
+but its platform linker/runtime support remains a separate task.
+
+Update the base, drivers and base_files together. Refresh the vendored
+STM32-map.cmake, flash_config.h.in and linker template from this base_files
+version, or set STM32_BASE_FILES_DIR to its local checkout. Old format-2 maps
+and old flash_config templates are rejected. This is also necessary in an
+existing copied project: updating only the source repositories
+does not replace that project's copies of cmake/*.cmake.
 
 Every read project.json is a configure dependency; every generated .ld is a
 link dependency. Changing heap/stack followed by build applies the new layout
@@ -224,6 +258,7 @@ after a value are not supported. Here is an example without comments:
   "name":         "firmware",
   "version":      "3.2",
   "device":       "STM32F446RE",
+  "flash_bank_mode": null,
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
@@ -613,18 +648,53 @@ Vendor `system_stm32*.c`, SystemInit и глобальный CMSIS clock API н�
 и не скачиваются. `system_stm32*.h` сохраняется: его включают device headers.
 Используйте `System::SystemCoreClock` с драйверами либо свой учёт частоты.
 
-### Single-bank Flash и зависимости
+### Режимы банков Flash и зависимости
 
-Реализованы только single-bank layouts. F72/F73 используют сектора 16/64/128 KiB;
-F74/F75 и single-bank F76/F77 — 32/128/256 KiB. G4 category 3 в single-bank имеет
-страницы 4 KiB. Драйверы используют ту же карту, что linker windows.
-До размещения/стирания по номерам секторов option bytes должны соответствовать
-single-bank: F76/F77 — nDBANK=1, G4 category 3 — DBANK=0, F42/F43 1 MiB — DB1M=0.
-Сборка сама option bytes не меняет.
+`flash_bank_mode` принимает `"single"` / `"dual"`. Отсутствие ключа/null выбирает
+фиксированный режим у single-only/dual-only устройств; у переключаемых по
+умолчанию single. Неподдерживаемый явный режим — ошибка конфигурации. Поэтому
+F429ZI (2 MiB) автоматически использует два банка. База и драйвер используют одну
+выбранную карту формата 3: адрес, размер, банк и аппаратный селектор стирания.
 
-F4 с 2 MiB Flash, включая F429ZI, требуют dual-bank и отклоняются при configure.
-H7 не поддерживается. G0B1/G0C1 пока отсутствуют в карте чипов платформы.
-Поддержка ядра драйверов остаётся F4/F7/G0.
+Столбец `FLASH_LAYOUT` таблицы устройств непосредственно выбирает общую геометрию.
+Наличие карт стирания single/dual определяет допустимые режимы; отдельных таблиц
+соответствий устройств и допустимых режимов нет.
+
+Переключаемые F4 с 1 MiB используют DB1M, F76/F77 — nDBANK, G0B1/C1 с 256 КиБ —
+DUAL_BANK. Flash-драйвер сверяет фактический режим при инициализации и возвращает
+SysInitStatus::InitError при несовпадении или активном bank swap. Для фиксированных
+режимов не читаются не относящиеся к ним биты. Option bytes задаёт пользователь;
+после изменения нужен сброс МК. При отключённых драйверах приложение на CMSIS
+само проверяет аппаратную конфигурацию.
+
+У G4 category 3 размер страниц single — 4 КиБ, dual — 2 КиБ. В вариантах
+128/256 КиБ dual между банками есть разрыв; банк 2 начинается с 0x08040000.
+Обычный код, константы и начальные данные RAM размещаются в первом непрерывном
+банке выбранного окна образа; `.flash_bank2` явно размещает const-данные или
+функции в доступном втором банке. Linker исключает разрыв и ограничивает обе
+области выбранным окном секторов. `app_start_sector` — логический индекс в карте
+стирания, включая банк 2; он не равен аппаратному селектору.
+
+```cpp
+__attribute__((section(".flash_bank2"))) const uint32_t table[16] = {1, 2, 3};
+```
+
+Непрерывная Flash в single/dual использует обычную единую область `FLASH`.
+Только для G4 с разрывом добавляются `FLASH_BANK2` и явная секция `.flash_bank2`.
+ELF/HEX сохраняют адреса обеих областей. Обычная генерация BIN сохранена;
+если данные есть в обеих областях, BIN содержит заполнение адресного разрыва.
+Отдельный бинарный файл второго банка не генерируется.
+
+В карты добавлены G0B0/B1/C1 и варианты L071/L072/L073 category 5. Поддержка
+Flash-драйвера остаётся F4/F7/G0. Карты H7 обновлены (включая страницы H7A3/B3
+по 8 КиБ), но linker/runtime платформы H7 остаётся отдельной задачей.
+
+Обновляйте базу, драйверы и base_files совместно. Замените сохранённые
+STM32-map.cmake, flash_config.h.in и linker-шаблон файлами этой версии base_files
+либо задайте STM32_BASE_FILES_DIR с путём к её рабочей копии. Старые карты
+формата 2 и старые flash_config-шаблоны отклоняются. Для уже скопированного
+проекта нужно также обновить его cmake/*.cmake: изменение
+исходных репозиториев само по себе не заменяет эти копии.
 
 Каждый прочитанный project.json вызывает reconfigure при изменении.
 Каждый сгенерированный .ld является зависимостью линковки: heap/stack применяются
@@ -707,6 +777,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   "name":         "firmware",
   "version":      "3.2",
   "device":       "STM32F446RE",
+  "flash_bank_mode": null,
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,

@@ -75,6 +75,7 @@ endfunction()
 #
 #   CFG_name CFG_version CFG_device     - required, FATAL_ERROR otherwise
 #   CFG_heap CFG_stack                  - default to 0x200 / 0x400
+#   CFG_flash_bank_mode                 - explicit single/dual, or empty (device default)
 #   CFG_sources CFG_include_dirs        - lists (may be empty)
 #   CFG_use_drivers                     - ON/OFF (see "drivers" below)
 #   CFG_drivers                         - list of optional modules
@@ -140,6 +141,20 @@ function(stm32_read_config PATH PREFIX)
 	if(NOT _version MATCHES "^[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?(\\.[0-9]+)?$")
 		message(FATAL_ERROR "${PATH}: 'version' must have one to four numeric components")
 	endif()
+
+	# Missing/null uses the device's fixed mode, or single on switchable parts.
+	set(_flash_bank_mode "")
+	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" flash_bank_mode)
+	if(NOT _e AND NOT _t STREQUAL "NULL")
+		if(NOT _t STREQUAL "STRING")
+			message(FATAL_ERROR "${PATH}: 'flash_bank_mode' must be single, dual, or null")
+		endif()
+		string(JSON _flash_bank_mode GET "${_cfg}" flash_bank_mode)
+		if(NOT (_flash_bank_mode STREQUAL "single" OR _flash_bank_mode STREQUAL "dual"))
+			message(FATAL_ERROR "${PATH}: 'flash_bank_mode' must be single or dual")
+		endif()
+	endif()
+	set(${PREFIX}_flash_bank_mode "${_flash_bank_mode}" PARENT_SCOPE)
 
 	# --- heap / stack with defaults ---
 	foreach(_k heap stack)
@@ -465,6 +480,8 @@ endfunction()
 # sectors, and END <= START are configuration-time errors.
 # ---------------------------------------------------------------------------
 function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
+	set(FLASH_BANK2_WINDOW_ORIGIN "" PARENT_SCOPE)
+	set(FLASH_BANK2_WINDOW_LENGTH 0 PARENT_SCOPE)
 	list(LENGTH STM32_FLASH_SECTORS _n)
 	math(EXPR _count "${_n} / 2")
 
@@ -508,6 +525,20 @@ function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 		list(GET STM32_FLASH_SECTORS ${_ei} _end_addr)
 	endif()
 	math(EXPR _len "${_end_addr} - ${_origin}")
+	if(STM32_FLASH_HAS_GAP)
+		# Ordinary image is confined to one contiguous bank. The selected
+		# part of the other bank is exposed through the explicit Flash section.
+		if(_origin LESS STM32_FLASH_BANK2_ORIGIN)
+			if(_end_addr GREATER STM32_FLASH_BANK1_END)
+				math(EXPR _len "${STM32_FLASH_BANK1_END} - ${_origin}")
+			endif()
+			if(_end_addr GREATER STM32_FLASH_BANK2_ORIGIN)
+				math(EXPR _bank2_len "${_end_addr} - ${STM32_FLASH_BANK2_ORIGIN}")
+				set(FLASH_BANK2_WINDOW_ORIGIN "${STM32_FLASH_BANK2_ORIGIN}" PARENT_SCOPE)
+				set(FLASH_BANK2_WINDOW_LENGTH "${_bank2_len}" PARENT_SCOPE)
+			endif()
+		endif()
+	endif()
 
 	set(${OUT_ORIGIN} "${_origin}" PARENT_SCOPE)
 	set(${OUT_LENGTH} "${_len}"    PARENT_SCOPE)
@@ -634,6 +665,12 @@ function(stm32_add_firmware TARGET)
 	math(EXPR _img_end "${FLASH_ORIGIN} + ${FLASH_LENGTH}" OUTPUT_FORMAT HEXADECIMAL)
 
 	# --- linker script for this target ---
+	set(FLASH_BANK2_MEMORY "")
+	set(FLASH_BANK2_SECTION "")
+	if(FLASH_BANK2_WINDOW_LENGTH GREATER 0)
+		set(FLASH_BANK2_MEMORY "  FLASH_BANK2 (rx) : ORIGIN = ${FLASH_BANK2_WINDOW_ORIGIN}, LENGTH = ${FLASH_BANK2_WINDOW_LENGTH}")
+		set(FLASH_BANK2_SECTION "  .flash_bank2 :\n  {\n    . = ALIGN(4);\n    *(.flash_bank2 .flash_bank2.*)\n    . = ALIGN(4);\n  } > FLASH_BANK2")
+	endif()
 	set(DMA_MEMORY_REGIONS "")
 	set(DMA_BUFFER_SECTIONS "")
 	set(DMA_ZERO_TABLE "")
