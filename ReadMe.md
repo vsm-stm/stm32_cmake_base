@@ -115,6 +115,12 @@ The platform exports `STM32_STARTUP_ENABLES_FPU` to firmware and drivers, so
 `System::Init()` skips the CPACR write and barriers already handled by startup.
 If replacing startup, remove this definition unless the replacement enables FPU.
 The base platform provides no separate FPU initialization API.
+When `bootloader` is configured in project.json, the platform also exports
+`STM32_USE_BOOTLOADER` to both images and the shared driver library. It enables
+the separate preparation function in `System::Init()` for F4/F7/G0: HSI,
+dividers /1, G0 VOS Range 1 and Flash latency 0. VOS/latency timeouts remain
+100 ms. Without the macro, call `System::Init()` once after hardware reset,
+before clock configuration; that preparation code is excluded from compilation.
 Pre-main constructors must not wait for IRQ-driven work: IRQ is still masked.
 Vendor `system_stm32*.c`, SystemInit and the global CMSIS clock API are not
 used/downloaded. `system_stm32*.h` is retained because device headers include it.
@@ -643,6 +649,12 @@ CP10/CP11 через `SCB->CPACR` после инициализации RAM. О�
 `System::Init()` пропускает запись CPACR и барьеры, уже выполненные startup.
 При замене startup уберите определение, если новый startup не включает FPU.
 Базовая платформа не предоставляет отдельного API инициализации FPU.
+При настроенном `bootloader` в project.json платформа также передаёт
+`STM32_USE_BOOTLOADER` обоим образам и общей библиотеке драйверов. Макрос
+включает отдельную функцию подготовки из `System::Init()` для F4/F7/G0:
+HSI, делители /1, VOS Range 1 на G0 и Flash latency 0. Таймауты VOS/latency
+остаются по 100 мс. Без макроса вызывайте `System::Init()` один раз после
+аппаратного сброса, до настройки частот; код подготовки исключён из компиляции.
 Конструкторы до main не должны ожидать работу через IRQ: прерывания ещё закрыты.
 Vendor `system_stm32*.c`, SystemInit и глобальный CMSIS clock API не используются
 и не скачиваются. `system_stm32*.h` сохраняется: его включают device headers.

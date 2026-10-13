@@ -53,6 +53,11 @@ target_compile_definitions(stm32_platform INTERFACE
 	STM32_STARTUP_ENABLES_FPU   # startup_common.c grants FPU access before constructors
 	$<$<CONFIG:Debug>:DEBUG>
 )
+
+if(CFG_use_bootloader)
+	target_compile_definitions(stm32_platform INTERFACE STM32_USE_BOOTLOADER)
+endif()
+
 target_compile_options(stm32_platform INTERFACE
 	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu from *-map.cmake
 	-fdata-sections -ffunction-sections            # for -Wl,--gc-sections
