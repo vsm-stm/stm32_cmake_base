@@ -50,6 +50,7 @@ target_compile_definitions(stm32_platform INTERFACE
 	${STM32_DEVICE_UC}   # STM32F446RE
 	${STM32_CORE}        # STM32F4
 	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # for #include STM32_DEVICE_HEADER in code without drivers
+	STM32_STARTUP_ENABLES_FPU   # startup_common.c grants FPU access before constructors
 	$<$<CONFIG:Debug>:DEBUG>
 )
 target_compile_options(stm32_platform INTERFACE
@@ -128,6 +129,7 @@ if(CFG_use_bootloader)
 	# The bootloader's own source list already supplies main().
 	list(APPEND _bl_sources ${CFG_bootloader_extra_sources})
 	stm32_add_firmware(bootloader
+		DMA_REGIONS   ${BL_dma_regions}
 		SOURCES       ${_bl_sources}
 		# this project's own include paths too: whatever extra_sources pulls in,
 		# it gets the same headers as the ordinary application image
@@ -162,6 +164,7 @@ if(CFG_use_drivers)
 endif()
 
 stm32_add_firmware(${CFG_name}
+	DMA_REGIONS   ${CFG_dma_regions}
 	${_sector}
 	SOURCES       ${_sources}
 	INCLUDE_DIRS  ${CFG_include_dirs}

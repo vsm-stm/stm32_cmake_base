@@ -17,6 +17,12 @@
 	//   ["UART", "SPI", ...]      — core + listed modules
 	"drivers":      null,
 
+	// Optional F7 non-cacheable DMA areas (requires drivers):
+	// [{"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}]
+	// Addresses are allocated automatically at the selected bank's end.
+	// Empty/null/absent reserves no memory. Buffers use section(".dma.adc").
+	"dma_regions":  [],
+
 	// your code and include paths
 	"sources":      ["src/main.cpp"],
 	"include_dirs": ["inc"],

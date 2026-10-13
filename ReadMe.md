@@ -111,6 +111,9 @@ The FPU block is omitted for devices/builds without
 hardware FPU use. Global/static constructors may therefore use float/double;
 FPU access does not depend on calling `System::Init()` from main.
 The drivers retain their FPU initialization for use with other startups.
+The platform exports `STM32_STARTUP_ENABLES_FPU` to firmware and drivers, so
+`System::Init()` skips the CPACR write and barriers already handled by startup.
+If replacing startup, remove this definition unless the replacement enables FPU.
 The base platform provides no separate FPU initialization API.
 Pre-main constructors must not wait for IRQ-driven work: IRQ is still masked.
 Vendor `system_stm32*.c`, SystemInit and the global CMSIS clock API are not
@@ -224,6 +227,7 @@ after a value are not supported. Here is an example without comments:
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -270,6 +274,51 @@ files (`cmake/`, `no_system_files/`, `cmsis-core/Include`) into its own tree
 and runs the same build script; its `project.json`'s top-level `app_start_sector`
 key sets `[0, N)`. The `STM32_DEVICE_HEADER` define (`"stm32f4xx.h"`) lets
 code without drivers write `#include STM32_DEVICE_HEADER`.
+
+#### Non-cacheable DMA buffers (STM32F7)
+
+`dma_regions` is optional. Missing/null/`[]` reserves no memory. A nonempty list
+requires F7 and enabled drivers (`true`, `[]` or a module list); on F4/G0 or
+without drivers it is a configuration error. Only internal SRAM1/SRAM2 is supported:
+
+```json
+"dma_regions": [
+  {"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}
+]
+```
+
+Names are unique identifiers. Sizes are powers of two, at least 32 bytes.
+MPU numbers are unique in 1..7; region 0 is reserved. Addresses are automatic,
+allocated from the selected bank's end in list order and aligned to each area's
+size. Alignment gaps are reserved too. Larger areas first can reduce wasted
+alignment space. Ordinary RAM length shrinks accordingly, including the stack
+top for SRAM1 and available `.sram2_bss` space for SRAM2. SRAM2 may be used entirely;
+SRAM1 must still accommodate ordinary data/heap/stack. Exhaustion is a configuration
+or link error. Explicit `address` and external memory are unsupported.
+
+```cpp
+__attribute__((section(".dma.adc"))) static uint16_t adc_buffer[1024];
+```
+
+Only global/static zero-initialized buffers are supported. Their sections are
+NOLOAD and are zeroed through the existing startup table before constructors.
+Do not use nonzero initializers or objects with dynamic initialization: initial
+contents are not copied from Flash. Unconfigured `.dma.*` sections are link errors.
+
+Call `System::Init()` before setting up peripherals or starting DMA. It sets
+the named MPU regions to Normal non-cacheable, shareable, read/write, execute-never,
+then enables D-cache. If the cache was already enabled, it is disabled with
+clean/invalidate first to preserve dirty data. Other MPU regions remain;
+avoid collisions with your own region numbers or higher-priority overlapping maps.
+Constructors must not start DMA; a bootloader must stop its DMA before handover.
+Normal stack/heap/data buffers remain outside these areas.
+
+The feature requires updated **drivers and base_files**. Configuration rejects
+old driver versions and F7 linker templates. For local base_files development,
+set `STM32_BASE_FILES_DIR` to the updated checkout; otherwise refresh the project's
+vendored `cmsis-core/download_files/linker/linker-f7.ld.in`. Application and bootloader
+use their own `project.json` areas independently. See the drivers' `System.md`
+for MPU/cache details. DMA cache maintenance in the remaining drivers is a later step.
 
 Flags: ones that do not depend on the configuration live in the
 `stm32_platform` target in `CMakeLists.txt`; optimization and debug info live
@@ -555,6 +604,9 @@ CP10/CP11 через `SCB->CPACR` после инициализации RAM. О�
 этот блок исключается. Поэтому глобальные/статические конструкторы могут
 использовать float/double; доступ к FPU не зависит от вызова `System::Init()`
 из main. Драйверы сохраняют включение FPU для работы с другими startup.
+Платформа передаёт firmware и драйверам `STM32_STARTUP_ENABLES_FPU`, поэтому
+`System::Init()` пропускает запись CPACR и барьеры, уже выполненные startup.
+При замене startup уберите определение, если новый startup не включает FPU.
 Базовая платформа не предоставляет отдельного API инициализации FPU.
 Конструкторы до main не должны ожидать работу через IRQ: прерывания ещё закрыты.
 Vendor `system_stm32*.c`, SystemInit и глобальный CMSIS clock API не используются
@@ -658,6 +710,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -675,6 +728,56 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
 - `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), с собственным `main()` — `extra_sources` добавляет реализацию `bl_stay(bl_stay_reason_t)` и её transport/hardware код: файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
 Автономный загрузчик (`stm32-bootloader`) скачивает файлы этой платформы (`cmake/`, `no_system_files/`, `cmsis-core/Include`) в своё дерево и запускает тот же сценарий; в его `project.json` верхний ключ `app_start_sector` задаёт `[0, N)`. Определение `STM32_DEVICE_HEADER` (`"stm32f4xx.h"`) позволяет коду без драйверов писать `#include STM32_DEVICE_HEADER`.
+
+#### Некешируемые DMA-буферы (STM32F7)
+
+`dma_regions` — необязательная настройка. Отсутствие ключа/null/`[]` ничего
+не резервирует. Непустой список требует F7 и включённых драйверов (`true`, `[]`
+или список модулей); на F4/G0 или без драйверов это ошибка конфигурации.
+Поддерживается только внутренняя SRAM1/SRAM2:
+
+```json
+"dma_regions": [
+  {"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}
+]
+```
+
+Имена — уникальные идентификаторы. Размеры — степени двойки, не меньше 32 байт.
+Номера MPU — уникальные в диапазоне 1..7; регион 0 зарезервирован. Адреса
+вычисляются автоматически с конца выбранной памяти в порядке списка с выравниванием
+по размеру каждой области. Отступы выравнивания тоже резервируются. Размещение
+больших областей первыми может уменьшить потери памяти. Длина обычной RAM
+уменьшается, включая верх stack в SRAM1 и доступное место `.sram2_bss` в SRAM2.
+SRAM2 можно занять целиком; в SRAM1 должно остаться место для обычных данных/heap/stack.
+Нехватка — ошибка конфигурации или линковки. Явный `address` и внешняя память
+не поддерживаются.
+
+```cpp
+__attribute__((section(".dma.adc"))) static uint16_t adc_buffer[1024];
+```
+
+Поддерживаются только глобальные/static-буферы с нулевой инициализацией.
+Секции NOLOAD обнуляются существующей таблицей startup до конструкторов.
+Нельзя использовать ненулевые начальные значения или объекты с динамической
+инициализацией: начальные данные из Flash не копируются. Ненастроенные секции
+`.dma.*` вызывают ошибку линковки.
+
+Вызывайте `System::Init()` до настройки периферии и запуска DMA. Он задаёт
+указанным регионам MPU атрибуты Normal non-cacheable, shareable, чтение/запись,
+запрет исполнения, затем включает D-cache. Если кеш уже включён, сначала
+выключает его с clean/invalidate и сохранением изменённых данных. Остальные
+регионы MPU остаются; исключите конфликты своих номеров и перекрытие регионами
+с более высоким приоритетом. Конструкторы не должны запускать DMA; загрузчик
+должен остановить свой DMA перед передачей управления. Обычные буферы
+stack/heap/data остаются за пределами этих областей.
+
+Нужны обновлённые **драйверы и base_files**. Конфигурация отклоняет старые
+версии драйверов и F7 linker-шаблона. Для локальной разработки base_files задайте
+`STM32_BASE_FILES_DIR` с путём к обновлённой рабочей копии; иначе обновите
+сохранённый в проекте `cmsis-core/download_files/linker/linker-f7.ld.in`.
+Приложение и загрузчик используют области из своих `project.json` независимо.
+Подробности MPU/кеша — в `System.md` драйверов. Обслуживание кешируемых DMA-буферов
+в остальных драйверах остаётся следующим этапом.
 
 Флаги: не зависящие от конфигурации — в таргете `stm32_platform` в `CMakeLists.txt`; оптимизация и отладка — в `CMakePresets.json`. В `project.json` флагов нет.
 
