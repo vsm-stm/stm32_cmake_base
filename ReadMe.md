@@ -226,7 +226,7 @@ enable. The chip header is included as `#include STM32_DEVICE_HEADER` (the
 define is set by the platform).
 
 A commented-out drivers-based variant is left in the code (`System::Init()`,
-`ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
+`ClockSystem::CalcPLL(...)` + `ClockSystem::Init<clocks>()`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
 to enable it, set `"drivers": true` and uncomment the drivers-core includes
 in `inc/main.hpp`.
 
@@ -756,7 +756,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
 
 Пример написан под F4; на другом семействе замените включение тактирования порта. Заголовок чипа подключается как `#include STM32_DEVICE_HEADER` (define задаёт платформа).
 
-В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
+В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::CalcPLL(...)` + `ClockSystem::Init<clocks>()`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
 
 ## Требования
 
