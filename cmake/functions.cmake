@@ -100,6 +100,13 @@ endfunction()
 #   update flag), with its own main(). The project provides bl_stay() and
 #   whatever transport/hardware code that function needs.
 #
+# "dma_regions": [{"name":"uart_rx","size":"0x4000","memory":"SRAM2","mpu_region":7}]
+#   Internal F7 SRAM1/SRAM2 only, with drivers enabled. No explicit address.
+#   Size is a power of two >=32; MPU numbers are unique in 1..7 (0 reserved).
+#   Per-image linker generation places areas at aligned bank tails and removes
+#   them from ordinary RAM. Buffers use .dma.<name>, are NOLOAD/zeroed at startup,
+#   and must not have nonzero initializers. System::Init configures their MPU.
+#
 # "drivers" in project.json:
 #   key absent / null / false  -> drivers are not built at all (CFG_use_drivers OFF)
 #   true                      -> core drivers only (system/rcc/gpio/flash/irq)
@@ -478,6 +485,9 @@ endfunction()
 # cmsis-download.cmake from the downloaded map table). End of flash is the
 # address plus the size of the last sector. Non-integer values, out-of-range
 # sectors, and END <= START are configuration-time errors.
+# For a gapped dual-bank geometry (G4), ordinary FLASH is limited to the contiguous
+# first-bank part and FLASH_BANK2_WINDOW_* exposes the selected second-bank part
+# explicitly. The address gap is never counted as usable linker memory.
 # ---------------------------------------------------------------------------
 function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 	set(FLASH_BANK2_WINDOW_ORIGIN "" PARENT_SCOPE)
@@ -646,6 +656,11 @@ endfunction()
 #   neighboring image.
 #   Example: bootloader START 0 END 4, application START 4 (no END).
 # DMA_REGIONS - validated name/memory/size/MPU-number records for this image.
+#   Allocation order follows JSON. Each region consumes the selected SRAM tail,
+#   including alignment padding; heap/stack remain in the reduced ordinary RAM.
+#   Generated zero-table pairs initialize NOLOAD buffers; separate MPU triples
+#   describe number/base/size. Both tables are in Flash, with independent consumers.
+#   An empty list emits no DMA sections or MPU records.
 #
 # Reads from the top-level scope: the stm32_platform target (CMakeLists.txt)
 # and whatever cmsis-download.cmake sets - STM32_LINKER_TEMPLATE,

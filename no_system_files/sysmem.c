@@ -48,7 +48,13 @@ static uint8_t *__sbrk_heap_end = NULL;
  * NOTE: If the MSP stack, at any point during execution, grows larger than the
  * reserved size, please increase the '_Min_Stack_Size'.
  *
- * @param incr Memory size
+ * This is a grow/shrink break, not an allocator of separate blocks. Allocation
+ * begins at _end and is bounded by _estack - _Min_Stack_Size, with unsigned
+ * distance checks before pointer arithmetic (including PTRDIFF_MIN shrink).
+ * _Min_Heap_Size reserves link-time minimum space; it is not the run-time ceiling.
+ * Heap calls must be serialized by the application/newlib configuration.
+ *
+ * @param incr Signed byte count; negative shrinks without passing _end.
  * @return Pointer to allocated memory
  */
 void *_sbrk(ptrdiff_t incr)

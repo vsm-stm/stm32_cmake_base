@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
+# User configuration belongs in project.json; target/compiler wiring stays here.
+# Disposable build/download/generated directories must contain no hand-written
+# project files: changing the device can remove their generated contents.
 # ─── project config: project.json -> CFG_* ──────────────────────────────────
 include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
 stm32_validate_build_directory()
@@ -54,6 +57,8 @@ target_compile_definitions(stm32_platform INTERFACE
 	$<$<CONFIG:Debug>:DEBUG>
 )
 
+# The shared drivers see bootloader handover preparation automatically. The
+# macro controls System clock/power/latency preparation, not a full peripheral reset.
 if(CFG_use_bootloader)
 	target_compile_definitions(stm32_platform INTERFACE STM32_USE_BOOTLOADER)
 endif()

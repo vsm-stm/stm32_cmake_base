@@ -134,6 +134,8 @@ message(STATUS "CMSIS target = ${c_target}")
 
 message(STATUS "STM32_NAME   = ${STM32_NAME}")
 
+# FLASH_LAYOUT is the last column of the selected model/density row. Its token
+# names a geometry (e.g. STM32F4_BANKED), not the compiler's STM32F4 family define.
 # The device row selects a shared Flash layout. Existing single/dual erase
 # lists define its supported modes; there is no separate lookup table.
 if(NOT STM32_FLASH_LAYOUT_VERSION EQUAL 3)
@@ -149,6 +151,9 @@ if(NOT _bank_modes)
 	message(FATAL_ERROR "No Flash bank modes for ${STM32_DEVICE_UC} (${STM32_NAME}, ${STM32_FLASH})")
 endif()
 list(LENGTH _bank_modes _mode_count)
+# One supported mode is mandatory automatically; two modes default to single.
+# Explicit project.json flash_bank_mode must match an available erase list.
+# This selects image geometry only; the Flash driver checks actual MCU option bits.
 set(STM32_FLASH_BANK_MODE "${CFG_flash_bank_mode}")
 if(STM32_FLASH_BANK_MODE STREQUAL "")
 	if(_mode_count EQUAL 1)
@@ -244,7 +249,7 @@ set(STM32_STARTUP_SRCS
 )
 
 # ----------------------------------------------------------------------------
-# download STM32 headers and system files
+# download STM32 headers (CMSIS system_stm32*.c/.h are not used by this runtime)
 # ----------------------------------------------------------------------------
 
 download_one(
