@@ -86,21 +86,38 @@ target_link_options(stm32_platform INTERFACE
 # ─── drivers ─────────────────────────────────────────────────────────────────
 #     "drivers" in project.json: key absent / null / false = do not build at all;
 #     true or [] = core only; ["UART", ...] = core + modules.
-#     The first configure clones into Drivers/, after that add_subdirectory as-is.
+#     "drivers_tag" selects a Git tag; absent/null follows main.
+#     Drivers/ is a disposable download: changing the tag replaces it entirely.
+#     Source and version are managed here from project.json only.
 set(_fw_link "")
 if(CFG_use_drivers)
 	set(STM32_DRIVERS_REQUESTED "${CFG_drivers}" CACHE STRING
 		"Optional driver modules" FORCE)
-	if(EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
-		add_subdirectory(Drivers "${CMAKE_BINARY_DIR}/_deps/drivers-build")
-	else()
-		include(FetchContent)
-		FetchContent_Declare(Drivers
-			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Drivers
-			GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
-			GIT_TAG        v2.1)
-		FetchContent_MakeAvailable(Drivers)
+	include(FetchContent)
+	# Ignore source overrides: project.json controls the downloaded drivers.
+	set(FETCHCONTENT_SOURCE_DIR_DRIVERS "")
+	set(_drivers_dir "${CMAKE_SOURCE_DIR}/Drivers")
+	set(_drivers_subbuild "${CMAKE_BINARY_DIR}/_deps/drivers-subbuild")
+	set(_drivers_tag_file "${_drivers_dir}/.stm32-drivers-tag")
+	set(_drivers_previous_tag "")
+	if(EXISTS "${_drivers_tag_file}")
+		file(READ "${_drivers_tag_file}" _drivers_previous_tag)
 	endif()
+	if(NOT "${_drivers_previous_tag}" STREQUAL "${CFG_drivers_tag}" OR
+		NOT EXISTS "${_drivers_dir}/CMakeLists.txt")
+		# Both paths are fixed children of this project's source/build directories.
+		# Reset population stamps as well, so a deleted checkout is cloned again.
+		file(REMOVE_RECURSE "${_drivers_dir}" "${_drivers_subbuild}")
+	endif()
+	FetchContent_Declare(Drivers
+		SOURCE_DIR     "${_drivers_dir}"
+		SUBBUILD_DIR   "${_drivers_subbuild}"
+		GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
+		GIT_TAG        "${CFG_drivers_tag}"
+		GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+	FetchContent_MakeAvailable(Drivers)
+	file(WRITE "${_drivers_tag_file}" "${CFG_drivers_tag}")
+	message(STATUS "Drivers: ${drivers_SOURCE_DIR} (requested: ${CFG_drivers_tag})")
 	set(_fw_link stm32_drivers)
 else()
 	message(STATUS "Drivers: disabled (\"drivers\" = null/false/absent in project.json)")

@@ -178,15 +178,16 @@ Every read project.json is a configure dependency; every generated .ld is a
 link dependency. Changing heap/stack followed by build applies the new layout
 without clean rebuild. Debug presets define DEBUG for platform consumers.
 
-For development with these adjacent repositories, use local dependencies:
+For local development of base-files and the bootloader, use:
 
 ```powershell
-cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
 ```
 
 The base-files override copies from that directory and tracks file changes.
-Remote files remain vendored after the first download. For reproducible
-projects, commit the downloaded files and select a fixed bootloader tag/revision.
+Remote platform files remain vendored after the first download. For reproducible
+projects, commit the downloaded platform files and select a fixed
+`drivers_tag` and bootloader tag/revision.
 Coordinated changes here and in STM32-base_files/bootloader/drivers must be
 available locally or published upstream before a clean remote configure.
 
@@ -268,6 +269,7 @@ after a value are not supported. Here is an example without comments:
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "drivers_tag":  null,
   "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
@@ -287,6 +289,15 @@ after a value are not supported. Here is an example without comments:
 
   Drivers support STM32 **F4 / F7 / G0**. For other families (including G4),
   set `null` and write your own register-level code, or port the drivers.
+- `drivers_tag` — optional driver Git tag, for example `"v2.1"`.
+  Missing/null selects the latest commit of `main` at each configure. It does
+  not enable drivers: set `drivers` separately. Changing the selected tag
+  deletes `Drivers/` and downloads the selected version again. A checkout
+  without the `.stm32-drivers-tag` version marker is also replaced on the first
+  configure with this base version. Keep application files outside `Drivers/`.
+  Drivers are always downloaded into the project's `Drivers/` directory;
+  their version is selected only through `project.json`. A source override
+  through `FETCHCONTENT_SOURCE_DIR_DRIVERS` is ignored.
 - `sources` / `include_dirs` — your code and include paths.
 - `bootloader` — `null` / key absent: no bootloader, firmware starts at the
   beginning of flash (no sectors). `{"app_start_sector": N, "repo": "...",
@@ -712,15 +723,15 @@ STM32-map.cmake, flash_config.h.in и linker-шаблон файлами это�
 Каждый сгенерированный .ld является зависимостью линковки: heap/stack применяются
 обычной сборкой без clean rebuild. Debug presets определяют DEBUG для потребителей платформы.
 
-При разработке с соседними репозиториями доступны локальные зависимости:
+Для локальной разработки base-files и загрузчика доступны:
 
 ```powershell
-cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
 ```
 
 Локальный base-files override отслеживает изменения файлов; удалённые файлы
-сохраняются после первой загрузки. Для повторяемости коммитьте скачанные файлы
-и выбирайте фиксированный tag/revision загрузчика. Согласованные изменения
+платформы сохраняются после первой загрузки. Для повторяемости коммитьте скачанные файлы
+и выбирайте фиксированные `drivers_tag` и tag/revision загрузчика. Согласованные изменения
 платформы/base_files/bootloader/drivers должны быть доступны локально либо
 опубликованы upstream до чистой конфигурации через сеть.
 
@@ -793,6 +804,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "drivers_tag":  null,
   "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
@@ -807,6 +819,16 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   - `["UART", "SPI", "DSP", ...]` — ядро + перечисленные опциональные модули (`UART`, `SPI`, `DMA`, `TIM`, `RTC`, `ADC`, `DAC`, `I2C`, `MODBUS`, `CONTAINERS`, `PID` — собственный ПИД-регулятор, `DSP` — подмножество CMSIS-DSP от Arm).
 
   Драйверы поддерживают STM32 **F4 / F7 / G0**. Для остальных семейств (в т.ч. G4) ставьте `null` и пишите под регистры сами, либо портируйте драйверы.
+- `drivers_tag` — необязательный Git-тег драйверов, например `"v2.1"`.
+  Если ключ отсутствует или равен `null`, при каждой конфигурации скачивается
+  последний коммит `main`. Параметр не включает драйверы: `drivers` задаётся
+  отдельно. При изменении выбранного тега папка `Drivers/` удаляется и
+  выбранная версия скачивается заново. Папка без отметки версии
+  `.stm32-drivers-tag` также заменяется при первой конфигурации с этой версией
+  базы. Файлы приложения должны находиться вне `Drivers/`.
+  Драйверы всегда скачиваются в папку `Drivers/` проекта; версия выбирается
+  только через `project.json`. Подмена исходников через
+  `FETCHCONTENT_SOURCE_DIR_DRIVERS` игнорируется.
 - `sources` / `include_dirs` — ваш код и include-пути.
 - `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), с собственным `main()` — `extra_sources` добавляет реализацию `bl_stay(bl_stay_reason_t)` и её transport/hardware код: файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 

@@ -79,6 +79,7 @@ endfunction()
 #   CFG_sources CFG_include_dirs        - lists (may be empty)
 #   CFG_use_drivers                     - ON/OFF (see "drivers" below)
 #   CFG_drivers                         - list of optional modules
+#   CFG_drivers_tag                     - Git tag; default main
 #   CFG_dma_regions                     - flat name/memory/size/MPU-number records
 #   CFG_app_start_sector                - "" or N; bootloader project only
 #                                         (top-level app_start_sector key: image [0, N))
@@ -112,6 +113,7 @@ endfunction()
 #   true                      -> core drivers only (system/rcc/gpio/flash/irq)
 #   []                        -> same, core only
 #   ["UART", "SPI", ...]      -> core + listed modules
+# "drivers_tag": optional nonempty Git tag string; absent/null follows main.
 #
 # All config validation happens here, in one pass. The format is data (JSON),
 # not code: there is no way to slip extra logic into the config by mistake.
@@ -209,6 +211,17 @@ function(stm32_read_config PATH PREFIX)
 	else()
 		message(FATAL_ERROR "${PATH}: 'drivers' must be an array, true/false, or null")
 	endif()
+
+	# --- optional drivers version ---
+	set(_drivers_tag "main")
+	string(JSON _tag_type ERROR_VARIABLE _e TYPE "${_cfg}" drivers_tag)
+	if(NOT _e AND NOT _tag_type STREQUAL "NULL")
+		string(JSON _drivers_tag GET "${_cfg}" drivers_tag)
+		if(NOT _tag_type STREQUAL "STRING" OR _drivers_tag STREQUAL "" OR _drivers_tag MATCHES ";")
+			message(FATAL_ERROR "${PATH}: 'drivers_tag' must be a nonempty string without semicolons, or null")
+		endif()
+	endif()
+	set(${PREFIX}_drivers_tag "${_drivers_tag}" PARENT_SCOPE)
 
 	# --- optional non-cacheable DMA areas; hardware/layout checks follow later ---
 	set(_dma_regions "")

@@ -19,6 +19,9 @@
 	//   true or []                — core only (system, rcc, gpio, flash, irq)
 	//   ["UART", "SPI", ...]      — core + listed modules
 	"drivers":      null,
+	// Driver Git tag; null / key absent follows the latest commit of main.
+	// Changing the tag deletes Drivers/ and downloads the selected version again.
+	"drivers_tag":  null,
 
 	// Optional F7 non-cacheable DMA areas (requires drivers):
 	// [{"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}]
