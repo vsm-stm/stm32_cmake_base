@@ -42,14 +42,16 @@
 #                                                      goes into the linker
 #                                                      script name:
 #                                                      STM32F446xE.ld)
-# This is a positional slice of the string, not a real parser - it assumes
-# CFG_device is always an 11-character part number following exactly this
-# grammar (family+type+package+flash letter). A name that is shorter, longer,
-# or does not follow the grammar (e.g. a part with no package letter) gets
-# sliced wrong with no error - there is no check against the STM32 naming
-# scheme here, only a check that the sliced name exists in the family's map
-# table below.
-string(SUBSTRING "${CFG_device}" 0 11 STM32_DEVICE)
+# Validate and normalize ordering-code suffixes before looking up the exact
+# chip row. CMSIS selectors are resolved from that row, not from these slices.
+string(TOUPPER "${CFG_device}" _device_code)
+if(_device_code MATCHES "^STM32H7")
+	message(FATAL_ERROR "STM32H7 is not supported: no platform linker/runtime layout is implemented")
+endif()
+if(NOT _device_code MATCHES "^STM32[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]([A-Z]([0-9](TR)?)?)?$")
+	message(FATAL_ERROR "Invalid STM32 ordering code '${CFG_device}': expected an 11-character MCU code, optionally followed by package/temperature suffix (e.g. T6 or T6TR)")
+endif()
+string(SUBSTRING "${_device_code}" 0 11 STM32_DEVICE)
 
 string(TOLOWER ${STM32_DEVICE} STM32_DEVICE_LC)
 string(TOUPPER ${STM32_DEVICE} STM32_DEVICE_UC)
@@ -57,6 +59,10 @@ message(STATUS "Device_LC: " ${STM32_DEVICE_LC})
 message(STATUS "Device_UC: " ${STM32_DEVICE_UC})
 
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 7 STM32_CORE)
+set(_supported_families STM32F0 STM32F1 STM32F2 STM32F3 STM32F4 STM32F7 STM32G0 STM32G4 STM32L0 STM32L1)
+if(NOT STM32_CORE IN_LIST _supported_families)
+	message(FATAL_ERROR "Unsupported STM32 family '${STM32_CORE}'")
+endif()
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 11 STM32_FLASH_def) # todo
 string(SUBSTRING "${STM32_DEVICE_UC}" 0 9 STM32_MODEL_UC)
 string(SUBSTRING "${STM32_DEVICE_UC}" 10 1 last_letter)     # flash size code letter
@@ -65,7 +71,6 @@ set(STM32_SERIES_UC "${STM32_CORE}xx")
 set(linker_name "${STM32_MODEL_UC}x${last_letter}.ld")
 string(TOLOWER ${STM32_MODEL_UC} STM32_MODEL_LC)
 string(TOLOWER ${STM32_SERIES_UC} STM32_SERIES_LC)
-set(c_target "${STM32_MODEL_UC}xx") # todo: pick based on STM32_CORE
 
 message(STATUS "STM32_CORE: 	 " ${STM32_CORE})
 message(STATUS "STM32_FLASH_def:" ${STM32_FLASH_def})
@@ -75,7 +80,6 @@ message(STATUS "STM32_MODEL_UC: " ${STM32_MODEL_UC})
 message(STATUS "STM32_MODEL_LC: " ${STM32_MODEL_LC})
 message(STATUS "linker_name: " ${linker_name}) # todo
 message(STATUS "last_letter: " ${last_letter}) # todo
-message(STATUS "c_target: " ${c_target})
 
 # ============================================================================
 # 2. Device change
@@ -114,26 +118,95 @@ math(EXPR IDX_NAME   "${IDX} + 1")
 math(EXPR IDX_FLASH  "${IDX} + 2")
 math(EXPR IDX_RAM    "${IDX} + 3")
 math(EXPR IDX_EXTRA  "${IDX} + 4")
+math(EXPR IDX_LAYOUT "${IDX} + 5")
 
 list(GET ${STM32_CORE}_MAP ${IDX_NAME}  STM32_NAME)
 list(GET ${STM32_CORE}_MAP ${IDX_FLASH} STM32_FLASH)
 list(GET ${STM32_CORE}_MAP ${IDX_RAM}   STM32_RAM)
 list(GET ${STM32_CORE}_MAP ${IDX_EXTRA} STM32_EXTRA)
+list(GET ${STM32_CORE}_MAP ${IDX_LAYOUT} STM32_FLASH_LAYOUT)
+
+# The CMSIS selector comes from the same row as the header/vector. Only x
+# placeholders stay lowercase (STM32F401xE, STM32F412Zx, STM32L152xCA, ...).
+string(TOUPPER "${STM32_NAME}" c_target)
+string(REPLACE "X" "x" c_target "${c_target}")
+message(STATUS "CMSIS target = ${c_target}")
 
 message(STATUS "STM32_NAME   = ${STM32_NAME}")
 
-# The erase-sector layout for this specific flash size - a ready-made
-# "addr;size;..." list, appended to the same map file by the
-# STM32-base_files/flash_sectors.py script. Read by stm32_flash_window()
-# and stm32_add_firmware() (both in functions.cmake), and by the drivers'
-# flash_config.h.
-set(STM32_FLASH_SECTORS "${${STM32_CORE}_SECTORS_${STM32_FLASH}}")
-if(NOT STM32_FLASH_SECTORS)
-	message(FATAL_ERROR
-		"cmsis-download: ${STM32_CORE}_SECTORS_${STM32_FLASH} not found for "
-		"${STM32_DEVICE_UC} (${STM32_FLASH}). Regenerate the map tables with "
-		"STM32-base_files/flash_sectors.py.")
+# FLASH_LAYOUT is the last column of the selected model/density row. Its token
+# names a geometry (e.g. STM32F4_BANKED), not the compiler's STM32F4 family define.
+# The device row selects a shared Flash layout. Existing single/dual erase
+# lists define its supported modes; there is no separate lookup table.
+if(NOT STM32_FLASH_LAYOUT_VERSION EQUAL 3)
+	message(FATAL_ERROR "Outdated STM32 map: refresh STM32-map.cmake from STM32-base_files (Flash layout format 3)")
 endif()
+set(_bank_modes "")
+foreach(_mode single dual)
+	if(DEFINED ${STM32_FLASH_LAYOUT}_ERASE_${_mode}_${STM32_FLASH})
+		list(APPEND _bank_modes ${_mode})
+	endif()
+endforeach()
+if(NOT _bank_modes)
+	message(FATAL_ERROR "No Flash bank modes for ${STM32_DEVICE_UC} (${STM32_NAME}, ${STM32_FLASH})")
+endif()
+list(LENGTH _bank_modes _mode_count)
+# One supported mode is mandatory automatically; two modes default to single.
+# Explicit project.json flash_bank_mode must match an available erase list.
+# This selects image geometry only; the Flash driver checks actual MCU option bits.
+set(STM32_FLASH_BANK_MODE "${CFG_flash_bank_mode}")
+if(STM32_FLASH_BANK_MODE STREQUAL "")
+	if(_mode_count EQUAL 1)
+		list(GET _bank_modes 0 STM32_FLASH_BANK_MODE)
+	else()
+		set(STM32_FLASH_BANK_MODE single)
+	endif()
+endif()
+if(NOT STM32_FLASH_BANK_MODE IN_LIST _bank_modes)
+	message(FATAL_ERROR "${STM32_DEVICE_UC}: flash_bank_mode '${STM32_FLASH_BANK_MODE}' is unsupported; available: ${_bank_modes}")
+endif()
+set(STM32_DUAL_BANK OFF)
+if(STM32_FLASH_BANK_MODE STREQUAL "dual")
+	set(STM32_DUAL_BANK ON)
+endif()
+set(STM32_FLASH_BANK_SWITCHABLE OFF)
+if(_mode_count GREATER 1)
+	set(STM32_FLASH_BANK_SWITCHABLE ON)
+endif()
+set(STM32_FLASH_ERASE_UNITS "${${STM32_FLASH_LAYOUT}_ERASE_${STM32_FLASH_BANK_MODE}_${STM32_FLASH}}")
+list(LENGTH STM32_FLASH_ERASE_UNITS _unit_fields)
+math(EXPR _unit_remainder "${_unit_fields} % 4")
+if(NOT _unit_fields OR NOT _unit_remainder EQUAL 0)
+	message(FATAL_ERROR "Invalid Flash erase map for ${STM32_DEVICE_UC}, ${STM32_FLASH_BANK_MODE}")
+endif()
+set(STM32_FLASH_SECTORS "")
+set(STM32_FLASH_HAS_GAP OFF)
+set(STM32_FLASH_BANK1_ORIGIN "")
+set(STM32_FLASH_BANK1_END "")
+set(STM32_FLASH_BANK2_ORIGIN "")
+set(STM32_FLASH_BANK2_END "")
+set(_seen_banks "")
+set(_units ${STM32_FLASH_ERASE_UNITS})
+set(_previous_end "")
+while(_units)
+	list(POP_FRONT _units _address _size _bank _number)
+	math(EXPR _end "${_address} + ${_size}")
+	if(NOT _previous_end STREQUAL "")
+		if(_address LESS _previous_end)
+			message(FATAL_ERROR "Overlapping/out-of-order Flash units for ${STM32_DEVICE_UC}")
+		elseif(_address GREATER _previous_end)
+			set(STM32_FLASH_HAS_GAP ON)
+		endif()
+	endif()
+	if(NOT _bank IN_LIST _seen_banks)
+		set(STM32_FLASH_BANK${_bank}_ORIGIN "${_address}")
+		list(APPEND _seen_banks "${_bank}")
+	endif()
+	set(STM32_FLASH_BANK${_bank}_END "${_end}")
+	set(_previous_end "${_end}")
+	list(APPEND STM32_FLASH_SECTORS "${_address}" "${_size}")
+endwhile()
+message(STATUS "Flash mode: ${STM32_FLASH_BANK_MODE} (supported: ${_bank_modes})")
 
 # ----------------------------------------------------------------------------
 # download the SVD by series and model - STM32F4/STM32F4xx.svd
@@ -176,7 +249,7 @@ set(STM32_STARTUP_SRCS
 )
 
 # ----------------------------------------------------------------------------
-# download STM32 headers and system files
+# download STM32 headers (CMSIS system_stm32*.c/.h are not used by this runtime)
 # ----------------------------------------------------------------------------
 
 download_one(
@@ -189,15 +262,19 @@ download_one(
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include"
 	"Device/${STM32_SERIES_UC}/Include/system_${STM32_SERIES_LC}.h")
 
-download_one(
-	"system_${STM32_SERIES_LC}.c"
-	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Source"
-	"Device/${STM32_SERIES_UC}/Source/system_${STM32_SERIES_LC}.c")
+# system_*.h is required by the ST device headers. The vendor system_*.c,
+# SystemInit and global SystemCoreClock implementation are intentionally unused.
 
 download_one(
 	"${STM32_NAME}.h"
 	"${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include"
 	"Device/${STM32_SERIES_UC}/Include/${STM32_NAME}.h")
+
+file(STRINGS "${CMAKE_SOURCE_DIR}/cmsis-core/download_files/Device/Include/${STM32_SERIES_LC}.h"
+	_selector_lines REGEX "${c_target}")
+if(NOT _selector_lines)
+	message(FATAL_ERROR "CMSIS header does not recognize selector ${c_target} for ${STM32_DEVICE_UC}")
+endif()
 
 # ============================================================================
 # 4. Linker script: pick a template per family (rendered by stm32_add_firmware)
@@ -263,12 +340,6 @@ if(STM32_CORE STREQUAL "STM32F7")
 	math(EXPR SRAM1_K "(${SRAM2_ORIGIN} - ${SRAM1_ORIGIN}) / 1024")
 	set(SRAM1_LENGTH "${SRAM1_K}K")
 
-elseif(STM32_CORE STREQUAL "STM32H7")
-	# TODO: STM32-base_files/linker/ does not have linker-h7.ld.in yet (only
-	# linker-simple/-f7/-ccm) - selecting an H7 device will fail below at
-	# download_one("linker-h7.ld.in", ...) with a 404, not with a clear
-	# "H7 is not supported" error. Fix upstream before claiming H7 support.
-	set(LD_TEMPLATE "linker-h7.ld.in")
 elseif(STM32_EXTRA AND NOT STM32_EXTRA STREQUAL "-" AND NOT STM32_EXTRA STREQUAL "0K")
 	set(LD_TEMPLATE "linker-ccm.ld.in")
 

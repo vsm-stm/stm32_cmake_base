@@ -3,10 +3,13 @@
 
 	// project name and version (name = target .elf file name)
 	"name":         "firmware",
-	"version":      "3.2",
+	"version":      "4.0",
 
-	// full chip part number, e.g. STM32F446RE, STM32F429ZI, STM32G474RE
+	// full chip part number, e.g. STM32F446RE, STM32F429ZG, STM32G474RE (single-bank)
 	"device":       "STM32f446ret",
+	// Flash bank mode: null/absent = fixed device mode, or single if switchable.
+	// Set single/dual to require a specific mode; option bytes are checked by Flash init.
+	"flash_bank_mode": null,
 	// heap and stack size for the linker script (default 0x200 / 0x400)
 	"heap":         "0x200",
 	"stack":        "0x400",
@@ -16,6 +19,15 @@
 	//   true or []                — core only (system, rcc, gpio, flash, irq)
 	//   ["UART", "SPI", ...]      — core + listed modules
 	"drivers":      null,
+	// Driver Git tag; null / key absent follows the latest commit of main.
+	// Changing the tag deletes Drivers/ and downloads the selected version again.
+	"drivers_tag":  null,
+
+	// Optional F7 non-cacheable DMA areas (requires drivers):
+	// [{"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}]
+	// Addresses are allocated automatically at the selected bank's end.
+	// Empty/null/absent reserves no memory. Buffers use section(".dma.adc").
+	"dma_regions":  [],
 
 	// your code and include paths
 	"sources":      ["src/main.cpp"],
@@ -27,7 +39,7 @@
 	//   bootloader at the start of flash (sectors [0, N)), this firmware starts at sector N.
 	//   The bootloader is cloned into Bootloader/ and built by this same project
 	//   (repo/tag are optional). extra_sources — your own files: stm32-bootloader has
-	//   no main() of its own (it is a library - image check, jump, update flag), you
-	//   write main() for the bootloader image and add it here.
+	//   supplies main(). Implement bl_stay(bl_stay_reason_t) in extra_sources;
+	//   do not add a second main(). An empty array contributes no extra files.
 	"bootloader":   null
 }

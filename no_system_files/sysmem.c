@@ -23,6 +23,7 @@
 /* Includes */
 #include <errno.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /**
  * Pointer to the current high watermark of the heap usage
@@ -47,7 +48,13 @@ static uint8_t *__sbrk_heap_end = NULL;
  * NOTE: If the MSP stack, at any point during execution, grows larger than the
  * reserved size, please increase the '_Min_Stack_Size'.
  *
- * @param incr Memory size
+ * This is a grow/shrink break, not an allocator of separate blocks. Allocation
+ * begins at _end and is bounded by _estack - _Min_Stack_Size, with unsigned
+ * distance checks before pointer arithmetic (including PTRDIFF_MIN shrink).
+ * _Min_Heap_Size reserves link-time minimum space; it is not the run-time ceiling.
+ * Heap calls must be serialized by the application/newlib configuration.
+ *
+ * @param incr Signed byte count; negative shrinks without passing _end.
  * @return Pointer to allocated memory
  */
 void *_sbrk(ptrdiff_t incr)
@@ -55,8 +62,15 @@ void *_sbrk(ptrdiff_t incr)
   extern uint8_t _end; /* Symbol defined in the linker script */
   extern uint8_t _estack; /* Symbol defined in the linker script */
   extern uint32_t _Min_Stack_Size; /* Symbol defined in the linker script */
-  const uint32_t stack_limit = (uint32_t)&_estack - (uint32_t)&_Min_Stack_Size;
-  const uint8_t *max_heap = (uint8_t *)stack_limit;
+  const uintptr_t heap_start = (uintptr_t)&_end;
+  const uintptr_t stack_top = (uintptr_t)&_estack;
+  const uintptr_t stack_size = (uintptr_t)&_Min_Stack_Size;
+  if (stack_size > stack_top || heap_start > stack_top - stack_size)
+  {
+    errno = ENOMEM;
+    return (void *)-1;
+  }
+  const uintptr_t heap_limit = stack_top - stack_size;
   uint8_t *prev_heap_end;
 
   /* Initialize heap end at first call */
@@ -65,15 +79,17 @@ void *_sbrk(ptrdiff_t incr)
     __sbrk_heap_end = &_end;
   }
 
-  /* Protect heap from growing into the reserved MSP stack */
-  if (__sbrk_heap_end + incr > max_heap)
+  const uintptr_t current = (uintptr_t)__sbrk_heap_end;
+  /* Check available distances before arithmetic; PTRDIFF_MIN is valid input. */
+  if ((incr >= 0 && (uintptr_t)incr > heap_limit - current)
+      || (incr < 0 && ((uintptr_t)(-(incr + 1)) + 1U) > current - heap_start))
   {
     errno = ENOMEM;
     return (void *)-1;
   }
 
   prev_heap_end = __sbrk_heap_end;
-  __sbrk_heap_end += incr;
+  __sbrk_heap_end = (uint8_t *)(current + (uintptr_t)incr);
 
   return (void *)prev_heap_end;
 }

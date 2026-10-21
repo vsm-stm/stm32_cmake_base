@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
 
+# User configuration belongs in project.json; target/compiler wiring stays here.
+# Disposable build/download/generated directories must contain no hand-written
+# project files: changing the device can remove their generated contents.
 # ─── project config: project.json -> CFG_* ──────────────────────────────────
 include(${CMAKE_SOURCE_DIR}/cmake/functions.cmake)
+stm32_validate_build_directory()
 stm32_read_config(${CMAKE_SOURCE_DIR}/project.json CFG)
 
 # ─── toolchain (only "which compiler"; flags live in stm32_platform/presets) ─
@@ -49,7 +53,16 @@ target_compile_definitions(stm32_platform INTERFACE
 	${STM32_DEVICE_UC}   # STM32F446RE
 	${STM32_CORE}        # STM32F4
 	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # for #include STM32_DEVICE_HEADER in code without drivers
+	STM32_STARTUP_ENABLES_FPU   # startup_common.c grants FPU access before constructors
+	$<$<CONFIG:Debug>:DEBUG>
 )
+
+# The shared drivers see bootloader handover preparation automatically. The
+# macro controls System clock/power/latency preparation, not a full peripheral reset.
+if(CFG_use_bootloader)
+	target_compile_definitions(stm32_platform INTERFACE STM32_USE_BOOTLOADER)
+endif()
+
 target_compile_options(stm32_platform INTERFACE
 	-mthumb ${main_cpu_PARAMS}                     # cpu/fpu from *-map.cmake
 	-fdata-sections -ffunction-sections            # for -Wl,--gc-sections
@@ -73,21 +86,38 @@ target_link_options(stm32_platform INTERFACE
 # ─── drivers ─────────────────────────────────────────────────────────────────
 #     "drivers" in project.json: key absent / null / false = do not build at all;
 #     true or [] = core only; ["UART", ...] = core + modules.
-#     The first configure clones into Drivers/, after that add_subdirectory as-is.
+#     "drivers_tag" selects a Git tag; absent/null follows main.
+#     Drivers/ is a disposable download: changing the tag replaces it entirely.
+#     Source and version are managed here from project.json only.
 set(_fw_link "")
 if(CFG_use_drivers)
 	set(STM32_DRIVERS_REQUESTED "${CFG_drivers}" CACHE STRING
 		"Optional driver modules" FORCE)
-	if(EXISTS "${CMAKE_SOURCE_DIR}/Drivers/CMakeLists.txt")
-		add_subdirectory(Drivers "${CMAKE_BINARY_DIR}/_deps/drivers-build")
-	else()
-		include(FetchContent)
-		FetchContent_Declare(Drivers
-			SOURCE_DIR     ${CMAKE_SOURCE_DIR}/Drivers
-			GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
-			GIT_TAG        v2.2)
-		FetchContent_MakeAvailable(Drivers)
+	include(FetchContent)
+	# Ignore source overrides: project.json controls the downloaded drivers.
+	set(FETCHCONTENT_SOURCE_DIR_DRIVERS "")
+	set(_drivers_dir "${CMAKE_SOURCE_DIR}/Drivers")
+	set(_drivers_subbuild "${CMAKE_BINARY_DIR}/_deps/drivers-subbuild")
+	set(_drivers_tag_file "${_drivers_dir}/.stm32-drivers-tag")
+	set(_drivers_previous_tag "")
+	if(EXISTS "${_drivers_tag_file}")
+		file(READ "${_drivers_tag_file}" _drivers_previous_tag)
 	endif()
+	if(NOT "${_drivers_previous_tag}" STREQUAL "${CFG_drivers_tag}" OR
+		NOT EXISTS "${_drivers_dir}/CMakeLists.txt")
+		# Both paths are fixed children of this project's source/build directories.
+		# Reset population stamps as well, so a deleted checkout is cloned again.
+		file(REMOVE_RECURSE "${_drivers_dir}" "${_drivers_subbuild}")
+	endif()
+	FetchContent_Declare(Drivers
+		SOURCE_DIR     "${_drivers_dir}"
+		SUBBUILD_DIR   "${_drivers_subbuild}"
+		GIT_REPOSITORY https://github.com/vsm-stm/STM32_Drivers_CPP.git
+		GIT_TAG        "${CFG_drivers_tag}"
+		GIT_REMOTE_UPDATE_STRATEGY CHECKOUT)
+	FetchContent_MakeAvailable(Drivers)
+	file(WRITE "${_drivers_tag_file}" "${CFG_drivers_tag}")
+	message(STATUS "Drivers: ${drivers_SOURCE_DIR} (requested: ${CFG_drivers_tag})")
 	set(_fw_link stm32_drivers)
 else()
 	message(STATUS "Drivers: disabled (\"drivers\" = null/false/absent in project.json)")
@@ -122,12 +152,11 @@ if(CFG_use_bootloader)
 	if(CFG_use_drivers)
 		list(APPEND _bl_sources ${BL_driver_sources})
 	endif()
-	# extra_sources from "bootloader" in THIS project's project.json: stm32-bootloader
-	# has no main() of its own (a library: image check, jump, update flag, no
-	# contract on "hardware"/protocol) - main() for the bootloader image is
-	# written by the project and added right here.
+	# extra_sources supplies bl_stay() and its transport/hardware code.
+	# The bootloader's own source list already supplies main().
 	list(APPEND _bl_sources ${CFG_bootloader_extra_sources})
 	stm32_add_firmware(bootloader
+		DMA_REGIONS   ${BL_dma_regions}
 		SOURCES       ${_bl_sources}
 		# this project's own include paths too: whatever extra_sources pulls in,
 		# it gets the same headers as the ordinary application image
@@ -162,6 +191,7 @@ if(CFG_use_drivers)
 endif()
 
 stm32_add_firmware(${CFG_name}
+	DMA_REGIONS   ${CFG_dma_regions}
 	${_sector}
 	SOURCES       ${_sources}
 	INCLUDE_DIRS  ${CFG_include_dirs}
