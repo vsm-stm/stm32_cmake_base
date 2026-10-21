@@ -329,6 +329,9 @@ code without drivers write `#include STM32_DEVICE_HEADER`.
 
 #### Non-cacheable DMA buffers (STM32F7)
 
+**Step-by-step guide with examples (UART, ADC, SPI), memory layout and error
+messages: [DMA_REGIONS.md](DMA_REGIONS.md).**
+
 `dma_regions` is optional. Missing/null/`[]` reserves no memory. A nonempty list
 requires F7 and enabled drivers (`true`, `[]` or a module list); on F4/G0 or
 without drivers it is a configuration error. Only internal SRAM1/SRAM2 is supported:
@@ -370,7 +373,8 @@ old driver versions and F7 linker templates. For local base_files development,
 set `STM32_BASE_FILES_DIR` to the updated checkout; otherwise refresh the project's
 vendored `cmsis-core/download_files/linker/linker-f7.ld.in`. Application and bootloader
 use their own `project.json` areas independently. See the drivers' `System.md`
-for MPU/cache details. DMA cache maintenance in the remaining drivers is a later step.
+for MPU/cache details. Buffers outside these areas also work: the drivers
+(UART, SPI, I2C, ADC, TIM) perform cache maintenance for ordinary cacheable buffers.
 
 Flags: ones that do not depend on the configuration live in the
 `stm32_platform` target in `CMakeLists.txt`; optimization and debug info live
@@ -836,6 +840,9 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
 
 #### Некешируемые DMA-буферы (STM32F7)
 
+**Пошаговое руководство с примерами (UART, ADC, SPI), раскладкой памяти и
+сообщениями об ошибках: [DMA_REGIONS.md](DMA_REGIONS.md#русский).**
+
 `dma_regions` — необязательная настройка. Отсутствие ключа/null/`[]` ничего
 не резервирует. Непустой список требует F7 и включённых драйверов (`true`, `[]`
 или список модулей); на F4/G0 или без драйверов это ошибка конфигурации.
@@ -881,8 +888,9 @@ stack/heap/data остаются за пределами этих областе
 `STM32_BASE_FILES_DIR` с путём к обновлённой рабочей копии; иначе обновите
 сохранённый в проекте `cmsis-core/download_files/linker/linker-f7.ld.in`.
 Приложение и загрузчик используют области из своих `project.json` независимо.
-Подробности MPU/кеша — в `System.md` драйверов. Обслуживание кешируемых DMA-буферов
-в остальных драйверах остаётся следующим этапом.
+Подробности MPU/кеша — в `System.md` драйверов. Буферы вне этих областей тоже
+работают: драйверы (UART, SPI, I2C, ADC, TIM) сами обслуживают кеш для обычных
+кешируемых буферов.
 
 Флаги: не зависящие от конфигурации — в таргете `stm32_platform` в `CMakeLists.txt`; оптимизация и отладка — в `CMakePresets.json`. В `project.json` флагов нет.
 
