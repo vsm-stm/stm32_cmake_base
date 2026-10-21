@@ -3,7 +3,7 @@
 
 	// project name and version (name = target .elf file name)
 	"name":         "firmware",
-	"version":      "3.2",
+	"version":      "4.0",
 
 	// full chip part number, e.g. STM32F446RE, STM32F429ZG, STM32G474RE (single-bank)
 	"device":       "STM32f446ret",
