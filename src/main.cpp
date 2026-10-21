@@ -7,9 +7,13 @@
 
 int main()
 {
+	// The following commented variant uses the current constexpr RCC API.
+	// Check System::Init() before applying clocks; SYSCLK is configured once
+	// before peripheral setup. Plain-CMSIS code below remains a separate example.
 	// --- drivers variant (needs "drivers": true and the includes in main.hpp uncommented) ---
 	// System::Init();
-	// ClockSystem::InitCalcPLL(180000000, ClockSystem::PLL_ClockSource::HSE, 8000000);
+	// constexpr auto clocks = ClockSystem::CalcPLL(180 * MHz, ClockSystem::PLL_ClockSource::HSE, 8 * MHz);
+	// if (ClockSystem::Init<clocks>() != SysInitStatus::InitOK) System::DebugTrap("Clock init");
 	// System::Enable_CYCCNT();
 	// NUCLEO_LED.SetUp(PIN::TYPE::OUTPUT_PushPull);
 	// uint32_t tick = System::GetTick();

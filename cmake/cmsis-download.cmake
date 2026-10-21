@@ -118,11 +118,13 @@ math(EXPR IDX_NAME   "${IDX} + 1")
 math(EXPR IDX_FLASH  "${IDX} + 2")
 math(EXPR IDX_RAM    "${IDX} + 3")
 math(EXPR IDX_EXTRA  "${IDX} + 4")
+math(EXPR IDX_LAYOUT "${IDX} + 5")
 
 list(GET ${STM32_CORE}_MAP ${IDX_NAME}  STM32_NAME)
 list(GET ${STM32_CORE}_MAP ${IDX_FLASH} STM32_FLASH)
 list(GET ${STM32_CORE}_MAP ${IDX_RAM}   STM32_RAM)
 list(GET ${STM32_CORE}_MAP ${IDX_EXTRA} STM32_EXTRA)
+list(GET ${STM32_CORE}_MAP ${IDX_LAYOUT} STM32_FLASH_LAYOUT)
 
 # The CMSIS selector comes from the same row as the header/vector. Only x
 # placeholders stay lowercase (STM32F401xE, STM32F412Zx, STM32L152xCA, ...).
@@ -132,25 +134,79 @@ message(STATUS "CMSIS target = ${c_target}")
 
 message(STATUS "STM32_NAME   = ${STM32_NAME}")
 
-# The erase-sector layout for this specific flash size - a ready-made
-# "addr;size;..." list, appended to the same map file by the
-# STM32-base_files/flash_sectors.py script. Read by stm32_flash_window()
-# and stm32_add_firmware() (both in functions.cmake), and by the drivers'
-# flash_config.h.
-if(NOT STM32_FLASH_LAYOUT_VERSION EQUAL 2)
-	message(FATAL_ERROR "Outdated STM32 map: refresh cmsis-core/download_files from the updated STM32-base_files (Flash layout format 2)")
+# FLASH_LAYOUT is the last column of the selected model/density row. Its token
+# names a geometry (e.g. STM32F4_BANKED), not the compiler's STM32F4 family define.
+# The device row selects a shared Flash layout. Existing single/dual erase
+# lists define its supported modes; there is no separate lookup table.
+if(NOT STM32_FLASH_LAYOUT_VERSION EQUAL 3)
+	message(FATAL_ERROR "Outdated STM32 map: refresh STM32-map.cmake from STM32-base_files (Flash layout format 3)")
+endif()
+set(_bank_modes "")
+foreach(_mode single dual)
+	if(DEFINED ${STM32_FLASH_LAYOUT}_ERASE_${_mode}_${STM32_FLASH})
+		list(APPEND _bank_modes ${_mode})
+	endif()
+endforeach()
+if(NOT _bank_modes)
+	message(FATAL_ERROR "No Flash bank modes for ${STM32_DEVICE_UC} (${STM32_NAME}, ${STM32_FLASH})")
+endif()
+list(LENGTH _bank_modes _mode_count)
+# One supported mode is mandatory automatically; two modes default to single.
+# Explicit project.json flash_bank_mode must match an available erase list.
+# This selects image geometry only; the Flash driver checks actual MCU option bits.
+set(STM32_FLASH_BANK_MODE "${CFG_flash_bank_mode}")
+if(STM32_FLASH_BANK_MODE STREQUAL "")
+	if(_mode_count EQUAL 1)
+		list(GET _bank_modes 0 STM32_FLASH_BANK_MODE)
+	else()
+		set(STM32_FLASH_BANK_MODE single)
+	endif()
+endif()
+if(NOT STM32_FLASH_BANK_MODE IN_LIST _bank_modes)
+	message(FATAL_ERROR "${STM32_DEVICE_UC}: flash_bank_mode '${STM32_FLASH_BANK_MODE}' is unsupported; available: ${_bank_modes}")
 endif()
 set(STM32_DUAL_BANK OFF)
-set(_layout "${STM32_CORE}")
-if(DEFINED ${STM32_CORE}_LAYOUT_${STM32_NAME})
-	set(_layout "${${STM32_CORE}_LAYOUT_${STM32_NAME}}")
+if(STM32_FLASH_BANK_MODE STREQUAL "dual")
+	set(STM32_DUAL_BANK ON)
 endif()
-set(STM32_FLASH_SECTORS "${${_layout}_SECTORS_${STM32_FLASH}}")
-if(NOT STM32_FLASH_SECTORS)
-	message(FATAL_ERROR
-		"No supported single-bank Flash layout for ${STM32_DEVICE_UC} (${STM32_FLASH}, ${_layout}). "
-		"Dual-bank layouts are not implemented.")
+set(STM32_FLASH_BANK_SWITCHABLE OFF)
+if(_mode_count GREATER 1)
+	set(STM32_FLASH_BANK_SWITCHABLE ON)
 endif()
+set(STM32_FLASH_ERASE_UNITS "${${STM32_FLASH_LAYOUT}_ERASE_${STM32_FLASH_BANK_MODE}_${STM32_FLASH}}")
+list(LENGTH STM32_FLASH_ERASE_UNITS _unit_fields)
+math(EXPR _unit_remainder "${_unit_fields} % 4")
+if(NOT _unit_fields OR NOT _unit_remainder EQUAL 0)
+	message(FATAL_ERROR "Invalid Flash erase map for ${STM32_DEVICE_UC}, ${STM32_FLASH_BANK_MODE}")
+endif()
+set(STM32_FLASH_SECTORS "")
+set(STM32_FLASH_HAS_GAP OFF)
+set(STM32_FLASH_BANK1_ORIGIN "")
+set(STM32_FLASH_BANK1_END "")
+set(STM32_FLASH_BANK2_ORIGIN "")
+set(STM32_FLASH_BANK2_END "")
+set(_seen_banks "")
+set(_units ${STM32_FLASH_ERASE_UNITS})
+set(_previous_end "")
+while(_units)
+	list(POP_FRONT _units _address _size _bank _number)
+	math(EXPR _end "${_address} + ${_size}")
+	if(NOT _previous_end STREQUAL "")
+		if(_address LESS _previous_end)
+			message(FATAL_ERROR "Overlapping/out-of-order Flash units for ${STM32_DEVICE_UC}")
+		elseif(_address GREATER _previous_end)
+			set(STM32_FLASH_HAS_GAP ON)
+		endif()
+	endif()
+	if(NOT _bank IN_LIST _seen_banks)
+		set(STM32_FLASH_BANK${_bank}_ORIGIN "${_address}")
+		list(APPEND _seen_banks "${_bank}")
+	endif()
+	set(STM32_FLASH_BANK${_bank}_END "${_end}")
+	set(_previous_end "${_end}")
+	list(APPEND STM32_FLASH_SECTORS "${_address}" "${_size}")
+endwhile()
+message(STATUS "Flash mode: ${STM32_FLASH_BANK_MODE} (supported: ${_bank_modes})")
 
 # ----------------------------------------------------------------------------
 # download the SVD by series and model - STM32F4/STM32F4xx.svd
@@ -193,7 +249,7 @@ set(STM32_STARTUP_SRCS
 )
 
 # ----------------------------------------------------------------------------
-# download STM32 headers and system files
+# download STM32 headers (CMSIS system_stm32*.c/.h are not used by this runtime)
 # ----------------------------------------------------------------------------
 
 download_one(

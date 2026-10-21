@@ -75,9 +75,12 @@ endfunction()
 #
 #   CFG_name CFG_version CFG_device     - required, FATAL_ERROR otherwise
 #   CFG_heap CFG_stack                  - default to 0x200 / 0x400
+#   CFG_flash_bank_mode                 - explicit single/dual, or empty (device default)
 #   CFG_sources CFG_include_dirs        - lists (may be empty)
 #   CFG_use_drivers                     - ON/OFF (see "drivers" below)
 #   CFG_drivers                         - list of optional modules
+#   CFG_drivers_tag                     - Git tag; default main
+#   CFG_dma_regions                     - flat name/memory/size/MPU-number records
 #   CFG_app_start_sector                - "" or N; bootloader project only
 #                                         (top-level app_start_sector key: image [0, N))
 #   CFG_use_bootloader CFG_bootloader_{app_start_sector,repo,tag,extra_sources}
@@ -98,11 +101,19 @@ endfunction()
 #   update flag), with its own main(). The project provides bl_stay() and
 #   whatever transport/hardware code that function needs.
 #
+# "dma_regions": [{"name":"uart_rx","size":"0x4000","memory":"SRAM2","mpu_region":7}]
+#   Internal F7 SRAM1/SRAM2 only, with drivers enabled. No explicit address.
+#   Size is a power of two >=32; MPU numbers are unique in 1..7 (0 reserved).
+#   Per-image linker generation places areas at aligned bank tails and removes
+#   them from ordinary RAM. Buffers use .dma.<name>, are NOLOAD/zeroed at startup,
+#   and must not have nonzero initializers. System::Init configures their MPU.
+#
 # "drivers" in project.json:
 #   key absent / null / false  -> drivers are not built at all (CFG_use_drivers OFF)
 #   true                      -> core drivers only (system/rcc/gpio/flash/irq)
 #   []                        -> same, core only
 #   ["UART", "SPI", ...]      -> core + listed modules
+# "drivers_tag": optional nonempty Git tag string; absent/null follows main.
 #
 # All config validation happens here, in one pass. The format is data (JSON),
 # not code: there is no way to slip extra logic into the config by mistake.
@@ -139,6 +150,20 @@ function(stm32_read_config PATH PREFIX)
 	if(NOT _version MATCHES "^[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?(\\.[0-9]+)?$")
 		message(FATAL_ERROR "${PATH}: 'version' must have one to four numeric components")
 	endif()
+
+	# Missing/null uses the device's fixed mode, or single on switchable parts.
+	set(_flash_bank_mode "")
+	string(JSON _t ERROR_VARIABLE _e TYPE "${_cfg}" flash_bank_mode)
+	if(NOT _e AND NOT _t STREQUAL "NULL")
+		if(NOT _t STREQUAL "STRING")
+			message(FATAL_ERROR "${PATH}: 'flash_bank_mode' must be single, dual, or null")
+		endif()
+		string(JSON _flash_bank_mode GET "${_cfg}" flash_bank_mode)
+		if(NOT (_flash_bank_mode STREQUAL "single" OR _flash_bank_mode STREQUAL "dual"))
+			message(FATAL_ERROR "${PATH}: 'flash_bank_mode' must be single or dual")
+		endif()
+	endif()
+	set(${PREFIX}_flash_bank_mode "${_flash_bank_mode}" PARENT_SCOPE)
 
 	# --- heap / stack with defaults ---
 	foreach(_k heap stack)
@@ -186,6 +211,83 @@ function(stm32_read_config PATH PREFIX)
 	else()
 		message(FATAL_ERROR "${PATH}: 'drivers' must be an array, true/false, or null")
 	endif()
+
+	# --- optional drivers version ---
+	set(_drivers_tag "main")
+	string(JSON _tag_type ERROR_VARIABLE _e TYPE "${_cfg}" drivers_tag)
+	if(NOT _e AND NOT _tag_type STREQUAL "NULL")
+		string(JSON _drivers_tag GET "${_cfg}" drivers_tag)
+		if(NOT _tag_type STREQUAL "STRING" OR _drivers_tag STREQUAL "" OR _drivers_tag MATCHES ";")
+			message(FATAL_ERROR "${PATH}: 'drivers_tag' must be a nonempty string without semicolons, or null")
+		endif()
+	endif()
+	set(${PREFIX}_drivers_tag "${_drivers_tag}" PARENT_SCOPE)
+
+	# --- optional non-cacheable DMA areas; hardware/layout checks follow later ---
+	set(_dma_regions "")
+	set(_dma_names "")
+	set(_dma_numbers "")
+	string(JSON _dma_type ERROR_VARIABLE _e TYPE "${_cfg}" dma_regions)
+	if(NOT _e AND NOT _dma_type STREQUAL "NULL")
+		if(NOT _dma_type STREQUAL "ARRAY")
+			message(FATAL_ERROR "${PATH}: 'dma_regions' must be an array or null")
+		endif()
+		string(JSON _dma_count LENGTH "${_cfg}" dma_regions)
+		if(_dma_count GREATER 0)
+			math(EXPR _dma_last "${_dma_count} - 1")
+			foreach(_i RANGE ${_dma_last})
+				string(JSON _type TYPE "${_cfg}" dma_regions ${_i})
+				if(NOT _type STREQUAL "OBJECT")
+					message(FATAL_ERROR "${PATH}: dma_regions[${_i}] must be an object")
+				endif()
+				string(JSON _type ERROR_VARIABLE _e TYPE "${_cfg}" dma_regions ${_i} name)
+				if(_e OR NOT _type STREQUAL "STRING")
+					message(FATAL_ERROR "${PATH}: dma_regions[${_i}].name must be a string")
+				endif()
+				string(JSON _dma_name GET "${_cfg}" dma_regions ${_i} name)
+				if(NOT _dma_name MATCHES "^[A-Za-z_][A-Za-z0-9_]*$" OR _dma_name IN_LIST _dma_names)
+					message(FATAL_ERROR "${PATH}: DMA area names must be unique identifiers")
+				endif()
+				list(APPEND _dma_names "${_dma_name}")
+				string(JSON _type ERROR_VARIABLE _e TYPE "${_cfg}" dma_regions ${_i} memory)
+				if(_e OR NOT _type STREQUAL "STRING")
+					message(FATAL_ERROR "${PATH}: dma_regions[${_i}].memory must be SRAM1 or SRAM2")
+				endif()
+				string(JSON _memory GET "${_cfg}" dma_regions ${_i} memory)
+				if(NOT (_memory STREQUAL "SRAM1" OR _memory STREQUAL "SRAM2"))
+					message(FATAL_ERROR "${PATH}: DMA areas support only internal SRAM1/SRAM2")
+				endif()
+				string(JSON _type ERROR_VARIABLE _e TYPE "${_cfg}" dma_regions ${_i} address)
+				if(NOT _e)
+					message(FATAL_ERROR "${PATH}: DMA area addresses are automatic; remove 'address'")
+				endif()
+				foreach(_key size mpu_region)
+					string(JSON _type ERROR_VARIABLE _e TYPE "${_cfg}" dma_regions ${_i} ${_key})
+					if(_e OR NOT (_type STREQUAL "STRING" OR _type STREQUAL "NUMBER"))
+						message(FATAL_ERROR "${PATH}: dma_regions[${_i}].${_key} must be an unsigned integer")
+					endif()
+					string(JSON _value GET "${_cfg}" dma_regions ${_i} ${_key})
+					if(NOT _value MATCHES "^(0[xX][0-9A-Fa-f]+|[0-9]+)$")
+						message(FATAL_ERROR "${PATH}: dma_regions[${_i}].${_key} must be an unsigned integer")
+					endif()
+					math(EXPR _${_key} "${_value}")
+					if(_${_key} LESS 0 OR _${_key} GREATER 4294967295)
+						message(FATAL_ERROR "${PATH}: dma_regions[${_i}].${_key} is outside the 32-bit range")
+					endif()
+				endforeach()
+				math(EXPR _size_bits "${_size} & (${_size} - 1)")
+				if(_size LESS 32 OR NOT _size_bits EQUAL 0)
+					message(FATAL_ERROR "${PATH}: DMA area size must be a power of two, at least 32 bytes")
+				endif()
+				if(_mpu_region LESS 1 OR _mpu_region GREATER 7 OR _mpu_region IN_LIST _dma_numbers)
+					message(FATAL_ERROR "${PATH}: DMA MPU numbers must be unique in 1..7; region 0 is reserved")
+				endif()
+				list(APPEND _dma_numbers "${_mpu_region}")
+				list(APPEND _dma_regions "${_dma_name}" "${_memory}" "${_size}" "${_mpu_region}")
+			endforeach()
+		endif()
+	endif()
+	set(${PREFIX}_dma_regions "${_dma_regions}" PARENT_SCOPE)
 
 	# --- driver_sources: files built only alongside drivers (bootloader) ---
 	_stm32_json_array("${_cfg}" driver_sources _driver_sources)
@@ -396,8 +498,13 @@ endfunction()
 # cmsis-download.cmake from the downloaded map table). End of flash is the
 # address plus the size of the last sector. Non-integer values, out-of-range
 # sectors, and END <= START are configuration-time errors.
+# For a gapped dual-bank geometry (G4), ordinary FLASH is limited to the contiguous
+# first-bank part and FLASH_BANK2_WINDOW_* exposes the selected second-bank part
+# explicitly. The address gap is never counted as usable linker memory.
 # ---------------------------------------------------------------------------
 function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
+	set(FLASH_BANK2_WINDOW_ORIGIN "" PARENT_SCOPE)
+	set(FLASH_BANK2_WINDOW_LENGTH 0 PARENT_SCOPE)
 	list(LENGTH STM32_FLASH_SECTORS _n)
 	math(EXPR _count "${_n} / 2")
 
@@ -441,6 +548,20 @@ function(stm32_flash_window START END OUT_ORIGIN OUT_LENGTH)
 		list(GET STM32_FLASH_SECTORS ${_ei} _end_addr)
 	endif()
 	math(EXPR _len "${_end_addr} - ${_origin}")
+	if(STM32_FLASH_HAS_GAP)
+		# Ordinary image is confined to one contiguous bank. The selected
+		# part of the other bank is exposed through the explicit Flash section.
+		if(_origin LESS STM32_FLASH_BANK2_ORIGIN)
+			if(_end_addr GREATER STM32_FLASH_BANK1_END)
+				math(EXPR _len "${STM32_FLASH_BANK1_END} - ${_origin}")
+			endif()
+			if(_end_addr GREATER STM32_FLASH_BANK2_ORIGIN)
+				math(EXPR _bank2_len "${_end_addr} - ${STM32_FLASH_BANK2_ORIGIN}")
+				set(FLASH_BANK2_WINDOW_ORIGIN "${STM32_FLASH_BANK2_ORIGIN}" PARENT_SCOPE)
+				set(FLASH_BANK2_WINDOW_LENGTH "${_bank2_len}" PARENT_SCOPE)
+			endif()
+		endif()
+	endif()
 
 	set(${OUT_ORIGIN} "${_origin}" PARENT_SCOPE)
 	set(${OUT_LENGTH} "${_len}"    PARENT_SCOPE)
@@ -547,6 +668,12 @@ endfunction()
 #   is a link error (region FLASH overflowed), not a silent overlap with the
 #   neighboring image.
 #   Example: bootloader START 0 END 4, application START 4 (no END).
+# DMA_REGIONS - validated name/memory/size/MPU-number records for this image.
+#   Allocation order follows JSON. Each region consumes the selected SRAM tail,
+#   including alignment padding; heap/stack remain in the reduced ordinary RAM.
+#   Generated zero-table pairs initialize NOLOAD buffers; separate MPU triples
+#   describe number/base/size. Both tables are in Flash, with independent consumers.
+#   An empty list emits no DMA sections or MPU records.
 #
 # Reads from the top-level scope: the stm32_platform target (CMakeLists.txt)
 # and whatever cmsis-download.cmake sets - STM32_LINKER_TEMPLATE,
@@ -556,7 +683,7 @@ endfunction()
 # where cmsis-download.cmake has already run - from CMakeLists.txt.
 # ---------------------------------------------------------------------------
 function(stm32_add_firmware TARGET)
-	cmake_parse_arguments(FW "" "START_SECTOR;END_SECTOR" "SOURCES;INCLUDE_DIRS;LINK" ${ARGN})
+	cmake_parse_arguments(FW "" "START_SECTOR;END_SECTOR" "SOURCES;INCLUDE_DIRS;LINK;DMA_REGIONS" ${ARGN})
 
 	# --- this image's flash window ---
 	stm32_flash_window("${FW_START_SECTOR}" "${FW_END_SECTOR}" FLASH_ORIGIN FLASH_LENGTH)
@@ -566,6 +693,62 @@ function(stm32_add_firmware TARGET)
 	math(EXPR _img_end "${FLASH_ORIGIN} + ${FLASH_LENGTH}" OUTPUT_FORMAT HEXADECIMAL)
 
 	# --- linker script for this target ---
+	set(FLASH_BANK2_MEMORY "")
+	set(FLASH_BANK2_SECTION "")
+	if(FLASH_BANK2_WINDOW_LENGTH GREATER 0)
+		set(FLASH_BANK2_MEMORY "  FLASH_BANK2 (rx) : ORIGIN = ${FLASH_BANK2_WINDOW_ORIGIN}, LENGTH = ${FLASH_BANK2_WINDOW_LENGTH}")
+		set(FLASH_BANK2_SECTION "  .flash_bank2 :\n  {\n    . = ALIGN(4);\n    *(.flash_bank2 .flash_bank2.*)\n    . = ALIGN(4);\n  } > FLASH_BANK2")
+	endif()
+	set(DMA_MEMORY_REGIONS "")
+	set(DMA_BUFFER_SECTIONS "")
+	set(DMA_ZERO_TABLE "")
+	set(DMA_MPU_TABLE "")
+	if(FW_DMA_REGIONS)
+		if(NOT STM32_CORE STREQUAL "STM32F7" OR NOT CFG_use_drivers)
+			message(FATAL_ERROR "${TARGET}: dma_regions requires STM32F7 and enabled drivers")
+		endif()
+		get_target_property(_dma_supported stm32_drivers STM32_DMA_REGIONS_SUPPORTED)
+		if(NOT _dma_supported)
+			message(FATAL_ERROR "${TARGET}: update STM32_Drivers_CPP; this version does not apply dma_regions in System::Init()")
+		endif()
+		file(READ "${STM32_LINKER_TEMPLATE}" _ld_template)
+		foreach(_hook DMA_MEMORY_REGIONS DMA_BUFFER_SECTIONS DMA_ZERO_TABLE DMA_MPU_TABLE)
+			string(FIND "${_ld_template}" "@${_hook}@" _hook_pos)
+			if(_hook_pos LESS 0)
+				message(FATAL_ERROR "${TARGET}: outdated F7 linker template; refresh linker-f7.ld.in from STM32-base_files (or set STM32_BASE_FILES_DIR to the updated checkout)")
+			endif()
+		endforeach()
+		# Work with byte counts; variables stay local to this firmware image.
+		foreach(_bank SRAM1 SRAM2)
+			if(${_bank}_LENGTH MATCHES "^([0-9]+)K$")
+				math(EXPR ${_bank}_LENGTH "${CMAKE_MATCH_1} * 1024")
+			endif()
+		endforeach()
+		set(_areas ${FW_DMA_REGIONS})
+		while(_areas)
+			list(POP_FRONT _areas _name _bank _size _number)
+			# Allocate from the selected bank's end, aligned to the MPU area size.
+			math(EXPR _bank_end "${${_bank}_ORIGIN} + ${${_bank}_LENGTH}")
+			math(EXPR _address "(${_bank_end} - ${_size}) & ~(${_size} - 1)")
+			math(EXPR _remaining "${_address} - ${${_bank}_ORIGIN}")
+			if(_remaining LESS 0 OR (_bank STREQUAL "SRAM1" AND _remaining EQUAL 0))
+				message(FATAL_ERROR "${TARGET}: DMA area '${_name}' does not fit ${_bank} with the required alignment and ordinary RAM")
+			endif()
+			set(${_bank}_LENGTH "${_remaining}")
+			math(EXPR _origin "${_address}" OUTPUT_FORMAT HEXADECIMAL)
+			string(APPEND DMA_MEMORY_REGIONS
+				"  DMA_${_name} (rw) : ORIGIN = ${_origin}, LENGTH = ${_size}\n")
+			string(APPEND DMA_BUFFER_SECTIONS
+				"  .dma.${_name} (NOLOAD) :\n  {\n"
+				"    . = ALIGN(32);\n    *(.dma.${_name} .dma.${_name}.*)\n"
+				"    . = ALIGN(32);\n  } > DMA_${_name}\n")
+			string(APPEND DMA_ZERO_TABLE
+				"    LONG(ADDR(.dma.${_name})); LONG(SIZEOF(.dma.${_name}));\n")
+			string(APPEND DMA_MPU_TABLE
+				"    LONG(${_number}); LONG(${_origin}); LONG(${_size});\n")
+			message(STATUS "${TARGET}: DMA '${_name}' ${_bank} ${_origin} + ${_size} B, MPU ${_number}")
+		endwhile()
+	endif()
 	set(_ld "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.ld")
 	configure_file("${STM32_LINKER_TEMPLATE}" "${_ld}" @ONLY)
 

@@ -111,39 +111,83 @@ The FPU block is omitted for devices/builds without
 hardware FPU use. Global/static constructors may therefore use float/double;
 FPU access does not depend on calling `System::Init()` from main.
 The drivers retain their FPU initialization for use with other startups.
+The platform exports `STM32_STARTUP_ENABLES_FPU` to firmware and drivers, so
+`System::Init()` skips the CPACR write and barriers already handled by startup.
+If replacing startup, remove this definition unless the replacement enables FPU.
 The base platform provides no separate FPU initialization API.
+When `bootloader` is configured in project.json, the platform also exports
+`STM32_USE_BOOTLOADER` to both images and the shared driver library. It enables
+the separate preparation function in `System::Init()` for F4/F7/G0: HSI,
+dividers /1, G0 VOS Range 1 and Flash latency 0. VOS/latency timeouts remain
+100 ms. Without the macro, call `System::Init()` once after hardware reset,
+before clock configuration; that preparation code is excluded from compilation.
 Pre-main constructors must not wait for IRQ-driven work: IRQ is still masked.
 Vendor `system_stm32*.c`, SystemInit and the global CMSIS clock API are not
 used/downloaded. `system_stm32*.h` is retained because device headers include it.
 Use `System::SystemCoreClock` with drivers, or maintain your own clock state.
 
-### Single-bank Flash and dependencies
+### Flash bank modes and dependencies
 
-Only single-bank layouts are supported. F72/F73 use 16/64/128 KiB sectors;
-F74/F75 and single-bank F76/F77 use 32/128/256 KiB sectors. G4 category 3 uses
-4 KiB pages in single-bank mode. Drivers use the same resolved list as the
-firmware linker windows. Set option bytes to the corresponding single-bank
-mode before using sector-based placement/erase; the build does not change
-option bytes. In particular, F76/F77 require nDBANK=1, G4 category 3 DBANK=0,
-and F42/F43 1 MiB parts require DB1M=0.
+`flash_bank_mode` accepts `"single"` / `"dual"`. Missing/null selects the fixed
+mode on single-only/dual-only devices; switchable devices default to single.
+Unsupported explicit modes are configuration errors. F429ZI (2 MiB) therefore
+uses both banks automatically. The base and driver share the same resolved
+format-3 erase map: address, size, bank and hardware erase selector.
 
-F4 2 MiB devices (including F429ZI) require dual bank and are rejected rather
-than given a fictitious layout. H7 is unsupported. G0B1/G0C1 are not yet in the
-platform's chip map. Core driver support remains F4/F7/G0.
+The device table's `FLASH_LAYOUT` column selects the shared geometry directly.
+Supported modes are determined by the presence of single/dual erase lists;
+there are no separate device-to-layout or supported-mode tables.
+
+F4 1 MiB bank-capable variants use DB1M; F76/F77 use nDBANK; G0B1/C1 256 KiB
+use DUAL_BANK. The Flash driver checks the actual mode during initialization
+and returns SysInitStatus::InitError on mismatch or active bank swap. Fixed
+modes ignore irrelevant option bits. Programming option bytes remains the
+user's responsibility; reset the MCU after changing them. With drivers disabled,
+the CMSIS application must check its own hardware configuration.
+
+For G4 category 3, single pages are 4 KiB and dual pages 2 KiB. The 128/256 KiB
+dual variants have an address gap before bank 2 at 0x08040000. Ordinary code,
+constants and RAM initializers stay in the first contiguous bank of the selected
+image window; `.flash_bank2` explicitly places const data or functions in the
+available second bank. The linker excludes the gap and limits both regions to
+the image's sector window. The logical `app_start_sector` indexes the erase map,
+including bank 2; it is not the hardware erase selector.
+
+```cpp
+__attribute__((section(".flash_bank2"))) const uint32_t table[16] = {1, 2, 3};
+```
+
+Contiguous single/dual layouts use the ordinary single `FLASH` region. Only
+G4 layouts with a gap add `FLASH_BANK2` and the explicit `.flash_bank2` section.
+ELF/HEX retain both regions' addresses. The usual BIN generation is unchanged;
+if both regions contain data, BIN includes padding across the address gap.
+No separate bank-2 binary is generated.
+
+G0B0/B1/C1 and L071/L072/L073 category-5 variants are now in the maps. Flash driver
+support remains F4/F7/G0. H7 erase maps are updated (including H7A3/B3 8 KiB pages),
+but its platform linker/runtime support remains a separate task.
+
+Update the base, drivers and base_files together. Refresh the vendored
+STM32-map.cmake, flash_config.h.in and linker template from this base_files
+version, or set STM32_BASE_FILES_DIR to its local checkout. Old format-2 maps
+and old flash_config templates are rejected. This is also necessary in an
+existing copied project: updating only the source repositories
+does not replace that project's copies of cmake/*.cmake.
 
 Every read project.json is a configure dependency; every generated .ld is a
 link dependency. Changing heap/stack followed by build applies the new layout
 without clean rebuild. Debug presets define DEBUG for platform consumers.
 
-For development with these adjacent repositories, use local dependencies:
+For local development of base-files and the bootloader, use:
 
 ```powershell
-cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
 ```
 
 The base-files override copies from that directory and tracks file changes.
-Remote files remain vendored after the first download. For reproducible
-projects, commit the downloaded files and select a fixed bootloader tag/revision.
+Remote platform files remain vendored after the first download. For reproducible
+projects, commit the downloaded platform files and select a fixed
+`drivers_tag` and bootloader tag/revision.
 Coordinated changes here and in STM32-base_files/bootloader/drivers must be
 available locally or published upstream before a clean remote configure.
 
@@ -183,7 +227,7 @@ enable. The chip header is included as `#include STM32_DEVICE_HEADER` (the
 define is set by the platform).
 
 A commented-out drivers-based variant is left in the code (`System::Init()`,
-`ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
+`ClockSystem::CalcPLL(...)` + `ClockSystem::Init<clocks>()`, `System::Enable_CYCCNT()`, `NUCLEO_LED`);
 to enable it, set `"drivers": true` and uncomment the drivers-core includes
 in `inc/main.hpp`.
 
@@ -221,9 +265,12 @@ after a value are not supported. Here is an example without comments:
   "name":         "firmware",
   "version":      "3.2",
   "device":       "STM32F446RE",
+  "flash_bank_mode": null,
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "drivers_tag":  null,
+  "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -242,6 +289,15 @@ after a value are not supported. Here is an example without comments:
 
   Drivers support STM32 **F4 / F7 / G0**. For other families (including G4),
   set `null` and write your own register-level code, or port the drivers.
+- `drivers_tag` — optional driver Git tag, for example `"v2.1"`.
+  Missing/null selects the latest commit of `main` at each configure. It does
+  not enable drivers: set `drivers` separately. Changing the selected tag
+  deletes `Drivers/` and downloads the selected version again. A checkout
+  without the `.stm32-drivers-tag` version marker is also replaced on the first
+  configure with this base version. Keep application files outside `Drivers/`.
+  Drivers are always downloaded into the project's `Drivers/` directory;
+  their version is selected only through `project.json`. A source override
+  through `FETCHCONTENT_SOURCE_DIR_DRIVERS` is ignored.
 - `sources` / `include_dirs` — your code and include paths.
 - `bootloader` — `null` / key absent: no bootloader, firmware starts at the
   beginning of flash (no sectors). `{"app_start_sector": N, "repo": "...",
@@ -270,6 +326,55 @@ files (`cmake/`, `no_system_files/`, `cmsis-core/Include`) into its own tree
 and runs the same build script; its `project.json`'s top-level `app_start_sector`
 key sets `[0, N)`. The `STM32_DEVICE_HEADER` define (`"stm32f4xx.h"`) lets
 code without drivers write `#include STM32_DEVICE_HEADER`.
+
+#### Non-cacheable DMA buffers (STM32F7)
+
+**Step-by-step guide with examples (UART, ADC, SPI), memory layout and error
+messages: [DMA_REGIONS.md](DMA_REGIONS.md).**
+
+`dma_regions` is optional. Missing/null/`[]` reserves no memory. A nonempty list
+requires F7 and enabled drivers (`true`, `[]` or a module list); on F4/G0 or
+without drivers it is a configuration error. Only internal SRAM1/SRAM2 is supported:
+
+```json
+"dma_regions": [
+  {"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}
+]
+```
+
+Names are unique identifiers. Sizes are powers of two, at least 32 bytes.
+MPU numbers are unique in 1..7; region 0 is reserved. Addresses are automatic,
+allocated from the selected bank's end in list order and aligned to each area's
+size. Alignment gaps are reserved too. Larger areas first can reduce wasted
+alignment space. Ordinary RAM length shrinks accordingly, including the stack
+top for SRAM1 and available `.sram2_bss` space for SRAM2. SRAM2 may be used entirely;
+SRAM1 must still accommodate ordinary data/heap/stack. Exhaustion is a configuration
+or link error. Explicit `address` and external memory are unsupported.
+
+```cpp
+__attribute__((section(".dma.adc"))) static uint16_t adc_buffer[1024];
+```
+
+Only global/static zero-initialized buffers are supported. Their sections are
+NOLOAD and are zeroed through the existing startup table before constructors.
+Do not use nonzero initializers or objects with dynamic initialization: initial
+contents are not copied from Flash. Unconfigured `.dma.*` sections are link errors.
+
+Call `System::Init()` before setting up peripherals or starting DMA. It sets
+the named MPU regions to Normal non-cacheable, shareable, read/write, execute-never,
+then enables D-cache. If the cache was already enabled, it is disabled with
+clean/invalidate first to preserve dirty data. Other MPU regions remain;
+avoid collisions with your own region numbers or higher-priority overlapping maps.
+Constructors must not start DMA; a bootloader must stop its DMA before handover.
+Normal stack/heap/data buffers remain outside these areas.
+
+The feature requires updated **drivers and base_files**. Configuration rejects
+old driver versions and F7 linker templates. For local base_files development,
+set `STM32_BASE_FILES_DIR` to the updated checkout; otherwise refresh the project's
+vendored `cmsis-core/download_files/linker/linker-f7.ld.in`. Application and bootloader
+use their own `project.json` areas independently. See the drivers' `System.md`
+for MPU/cache details. Buffers outside these areas also work: the drivers
+(UART, SPI, I2C, ADC, TIM) perform cache maintenance for ordinary cacheable buffers.
 
 Flags: ones that do not depend on the configuration live in the
 `stm32_platform` target in `CMakeLists.txt`; optimization and debug info live
@@ -555,38 +660,82 @@ CP10/CP11 через `SCB->CPACR` после инициализации RAM. О�
 этот блок исключается. Поэтому глобальные/статические конструкторы могут
 использовать float/double; доступ к FPU не зависит от вызова `System::Init()`
 из main. Драйверы сохраняют включение FPU для работы с другими startup.
+Платформа передаёт firmware и драйверам `STM32_STARTUP_ENABLES_FPU`, поэтому
+`System::Init()` пропускает запись CPACR и барьеры, уже выполненные startup.
+При замене startup уберите определение, если новый startup не включает FPU.
 Базовая платформа не предоставляет отдельного API инициализации FPU.
+При настроенном `bootloader` в project.json платформа также передаёт
+`STM32_USE_BOOTLOADER` обоим образам и общей библиотеке драйверов. Макрос
+включает отдельную функцию подготовки из `System::Init()` для F4/F7/G0:
+HSI, делители /1, VOS Range 1 на G0 и Flash latency 0. Таймауты VOS/latency
+остаются по 100 мс. Без макроса вызывайте `System::Init()` один раз после
+аппаратного сброса, до настройки частот; код подготовки исключён из компиляции.
 Конструкторы до main не должны ожидать работу через IRQ: прерывания ещё закрыты.
 Vendor `system_stm32*.c`, SystemInit и глобальный CMSIS clock API не используются
 и не скачиваются. `system_stm32*.h` сохраняется: его включают device headers.
 Используйте `System::SystemCoreClock` с драйверами либо свой учёт частоты.
 
-### Single-bank Flash и зависимости
+### Режимы банков Flash и зависимости
 
-Реализованы только single-bank layouts. F72/F73 используют сектора 16/64/128 KiB;
-F74/F75 и single-bank F76/F77 — 32/128/256 KiB. G4 category 3 в single-bank имеет
-страницы 4 KiB. Драйверы используют ту же карту, что linker windows.
-До размещения/стирания по номерам секторов option bytes должны соответствовать
-single-bank: F76/F77 — nDBANK=1, G4 category 3 — DBANK=0, F42/F43 1 MiB — DB1M=0.
-Сборка сама option bytes не меняет.
+`flash_bank_mode` принимает `"single"` / `"dual"`. Отсутствие ключа/null выбирает
+фиксированный режим у single-only/dual-only устройств; у переключаемых по
+умолчанию single. Неподдерживаемый явный режим — ошибка конфигурации. Поэтому
+F429ZI (2 MiB) автоматически использует два банка. База и драйвер используют одну
+выбранную карту формата 3: адрес, размер, банк и аппаратный селектор стирания.
 
-F4 с 2 MiB Flash, включая F429ZI, требуют dual-bank и отклоняются при configure.
-H7 не поддерживается. G0B1/G0C1 пока отсутствуют в карте чипов платформы.
-Поддержка ядра драйверов остаётся F4/F7/G0.
+Столбец `FLASH_LAYOUT` таблицы устройств непосредственно выбирает общую геометрию.
+Наличие карт стирания single/dual определяет допустимые режимы; отдельных таблиц
+соответствий устройств и допустимых режимов нет.
+
+Переключаемые F4 с 1 MiB используют DB1M, F76/F77 — nDBANK, G0B1/C1 с 256 КиБ —
+DUAL_BANK. Flash-драйвер сверяет фактический режим при инициализации и возвращает
+SysInitStatus::InitError при несовпадении или активном bank swap. Для фиксированных
+режимов не читаются не относящиеся к ним биты. Option bytes задаёт пользователь;
+после изменения нужен сброс МК. При отключённых драйверах приложение на CMSIS
+само проверяет аппаратную конфигурацию.
+
+У G4 category 3 размер страниц single — 4 КиБ, dual — 2 КиБ. В вариантах
+128/256 КиБ dual между банками есть разрыв; банк 2 начинается с 0x08040000.
+Обычный код, константы и начальные данные RAM размещаются в первом непрерывном
+банке выбранного окна образа; `.flash_bank2` явно размещает const-данные или
+функции в доступном втором банке. Linker исключает разрыв и ограничивает обе
+области выбранным окном секторов. `app_start_sector` — логический индекс в карте
+стирания, включая банк 2; он не равен аппаратному селектору.
+
+```cpp
+__attribute__((section(".flash_bank2"))) const uint32_t table[16] = {1, 2, 3};
+```
+
+Непрерывная Flash в single/dual использует обычную единую область `FLASH`.
+Только для G4 с разрывом добавляются `FLASH_BANK2` и явная секция `.flash_bank2`.
+ELF/HEX сохраняют адреса обеих областей. Обычная генерация BIN сохранена;
+если данные есть в обеих областях, BIN содержит заполнение адресного разрыва.
+Отдельный бинарный файл второго банка не генерируется.
+
+В карты добавлены G0B0/B1/C1 и варианты L071/L072/L073 category 5. Поддержка
+Flash-драйвера остаётся F4/F7/G0. Карты H7 обновлены (включая страницы H7A3/B3
+по 8 КиБ), но linker/runtime платформы H7 остаётся отдельной задачей.
+
+Обновляйте базу, драйверы и base_files совместно. Замените сохранённые
+STM32-map.cmake, flash_config.h.in и linker-шаблон файлами этой версии base_files
+либо задайте STM32_BASE_FILES_DIR с путём к её рабочей копии. Старые карты
+формата 2 и старые flash_config-шаблоны отклоняются. Для уже скопированного
+проекта нужно также обновить его cmake/*.cmake: изменение
+исходных репозиториев само по себе не заменяет эти копии.
 
 Каждый прочитанный project.json вызывает reconfigure при изменении.
 Каждый сгенерированный .ld является зависимостью линковки: heap/stack применяются
 обычной сборкой без clean rebuild. Debug presets определяют DEBUG для потребителей платформы.
 
-При разработке с соседними репозиториями доступны локальные зависимости:
+Для локальной разработки base-files и загрузчика доступны:
 
 ```powershell
-cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_DRIVERS=../STM32_Drivers_CPP -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
+cmake --preset debug -DSTM32_BASE_FILES_DIR=../STM32-base_files -DFETCHCONTENT_SOURCE_DIR_BOOTLOADER=../stm32-bootloader
 ```
 
 Локальный base-files override отслеживает изменения файлов; удалённые файлы
-сохраняются после первой загрузки. Для повторяемости коммитьте скачанные файлы
-и выбирайте фиксированный tag/revision загрузчика. Согласованные изменения
+платформы сохраняются после первой загрузки. Для повторяемости коммитьте скачанные файлы
+и выбирайте фиксированные `drivers_tag` и tag/revision загрузчика. Согласованные изменения
 платформы/base_files/bootloader/drivers должны быть доступны локально либо
 опубликованы upstream до чистой конфигурации через сеть.
 
@@ -622,7 +771,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
 
 Пример написан под F4; на другом семействе замените включение тактирования порта. Заголовок чипа подключается как `#include STM32_DEVICE_HEADER` (define задаёт платформа).
 
-В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::InitCalcPLL(...)`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
+В коде оставлен закомментированный вариант на драйверах (`System::Init()`, `ClockSystem::CalcPLL(...)` + `ClockSystem::Init<clocks>()`, `System::Enable_CYCCNT()`, `NUCLEO_LED`); чтобы его включить, поставьте `"drivers": true` и раскомментируйте includes ядра драйверов в `inc/main.hpp`.
 
 ## Требования
 
@@ -655,9 +804,12 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   "name":         "firmware",
   "version":      "3.2",
   "device":       "STM32F446RE",
+  "flash_bank_mode": null,
   "heap":         "0x200",
   "stack":        "0x400",
   "drivers":      null,
+  "drivers_tag":  null,
+  "dma_regions":  [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -671,10 +823,74 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   - `["UART", "SPI", "DSP", ...]` — ядро + перечисленные опциональные модули (`UART`, `SPI`, `DMA`, `TIM`, `RTC`, `ADC`, `DAC`, `I2C`, `MODBUS`, `CONTAINERS`, `PID` — собственный ПИД-регулятор, `DSP` — подмножество CMSIS-DSP от Arm).
 
   Драйверы поддерживают STM32 **F4 / F7 / G0**. Для остальных семейств (в т.ч. G4) ставьте `null` и пишите под регистры сами, либо портируйте драйверы.
+- `drivers_tag` — необязательный Git-тег драйверов, например `"v2.1"`.
+  Если ключ отсутствует или равен `null`, при каждой конфигурации скачивается
+  последний коммит `main`. Параметр не включает драйверы: `drivers` задаётся
+  отдельно. При изменении выбранного тега папка `Drivers/` удаляется и
+  выбранная версия скачивается заново. Папка без отметки версии
+  `.stm32-drivers-tag` также заменяется при первой конфигурации с этой версией
+  базы. Файлы приложения должны находиться вне `Drivers/`.
+  Драйверы всегда скачиваются в папку `Drivers/` проекта; версия выбирается
+  только через `project.json`. Подмена исходников через
+  `FETCHCONTENT_SOURCE_DIR_DRIVERS` игнорируется.
 - `sources` / `include_dirs` — ваш код и include-пути.
 - `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), с собственным `main()` — `extra_sources` добавляет реализацию `bl_stay(bl_stay_reason_t)` и её transport/hardware код: файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
 Автономный загрузчик (`stm32-bootloader`) скачивает файлы этой платформы (`cmake/`, `no_system_files/`, `cmsis-core/Include`) в своё дерево и запускает тот же сценарий; в его `project.json` верхний ключ `app_start_sector` задаёт `[0, N)`. Определение `STM32_DEVICE_HEADER` (`"stm32f4xx.h"`) позволяет коду без драйверов писать `#include STM32_DEVICE_HEADER`.
+
+#### Некешируемые DMA-буферы (STM32F7)
+
+**Пошаговое руководство с примерами (UART, ADC, SPI), раскладкой памяти и
+сообщениями об ошибках: [DMA_REGIONS.md](DMA_REGIONS.md#русский).**
+
+`dma_regions` — необязательная настройка. Отсутствие ключа/null/`[]` ничего
+не резервирует. Непустой список требует F7 и включённых драйверов (`true`, `[]`
+или список модулей); на F4/G0 или без драйверов это ошибка конфигурации.
+Поддерживается только внутренняя SRAM1/SRAM2:
+
+```json
+"dma_regions": [
+  {"name": "adc", "size": "0x4000", "memory": "SRAM2", "mpu_region": 7}
+]
+```
+
+Имена — уникальные идентификаторы. Размеры — степени двойки, не меньше 32 байт.
+Номера MPU — уникальные в диапазоне 1..7; регион 0 зарезервирован. Адреса
+вычисляются автоматически с конца выбранной памяти в порядке списка с выравниванием
+по размеру каждой области. Отступы выравнивания тоже резервируются. Размещение
+больших областей первыми может уменьшить потери памяти. Длина обычной RAM
+уменьшается, включая верх stack в SRAM1 и доступное место `.sram2_bss` в SRAM2.
+SRAM2 можно занять целиком; в SRAM1 должно остаться место для обычных данных/heap/stack.
+Нехватка — ошибка конфигурации или линковки. Явный `address` и внешняя память
+не поддерживаются.
+
+```cpp
+__attribute__((section(".dma.adc"))) static uint16_t adc_buffer[1024];
+```
+
+Поддерживаются только глобальные/static-буферы с нулевой инициализацией.
+Секции NOLOAD обнуляются существующей таблицей startup до конструкторов.
+Нельзя использовать ненулевые начальные значения или объекты с динамической
+инициализацией: начальные данные из Flash не копируются. Ненастроенные секции
+`.dma.*` вызывают ошибку линковки.
+
+Вызывайте `System::Init()` до настройки периферии и запуска DMA. Он задаёт
+указанным регионам MPU атрибуты Normal non-cacheable, shareable, чтение/запись,
+запрет исполнения, затем включает D-cache. Если кеш уже включён, сначала
+выключает его с clean/invalidate и сохранением изменённых данных. Остальные
+регионы MPU остаются; исключите конфликты своих номеров и перекрытие регионами
+с более высоким приоритетом. Конструкторы не должны запускать DMA; загрузчик
+должен остановить свой DMA перед передачей управления. Обычные буферы
+stack/heap/data остаются за пределами этих областей.
+
+Нужны обновлённые **драйверы и base_files**. Конфигурация отклоняет старые
+версии драйверов и F7 linker-шаблона. Для локальной разработки base_files задайте
+`STM32_BASE_FILES_DIR` с путём к обновлённой рабочей копии; иначе обновите
+сохранённый в проекте `cmsis-core/download_files/linker/linker-f7.ld.in`.
+Приложение и загрузчик используют области из своих `project.json` независимо.
+Подробности MPU/кеша — в `System.md` драйверов. Буферы вне этих областей тоже
+работают: драйверы (UART, SPI, I2C, ADC, TIM) сами обслуживают кеш для обычных
+кешируемых буферов.
 
 Флаги: не зависящие от конфигурации — в таргете `stm32_platform` в `CMakeLists.txt`; оптимизация и отладка — в `CMakePresets.json`. В `project.json` флагов нет.
 
