@@ -77,6 +77,7 @@ endfunction()
 #   CFG_heap CFG_stack                  - default to 0x200 / 0x400
 #   CFG_flash_bank_mode                 - explicit single/dual, or empty (device default)
 #   CFG_sources CFG_include_dirs        - lists (may be empty)
+#   CFG_defines                         - preprocessor definitions, without -D
 #   CFG_use_drivers                     - ON/OFF (see "drivers" below)
 #   CFG_drivers                         - list of optional modules
 #   CFG_drivers_tag                     - Git tag; default main
@@ -195,6 +196,8 @@ function(stm32_read_config PATH PREFIX)
 	# --- arrays -> lists ---
 	_stm32_json_array("${_cfg}" sources      _sources)
 	_stm32_json_array("${_cfg}" include_dirs _include_dirs)
+	_stm32_json_array("${_cfg}" defines      _defines)
+	set(${PREFIX}_defines "${_defines}" PARENT_SCOPE)
 
 	# --- drivers: tri-state (see the function header) ---
 	string(JSON _dt ERROR_VARIABLE _e TYPE "${_cfg}" drivers)

@@ -164,7 +164,19 @@ __attribute__((section(".dma.uart_rx"))) static Frame rx_frames[4];
 
 ## 6. Using the buffers with drivers
 
-Nothing changes in the driver API. Pass the buffer as usual; drivers detect that the range lies inside a configured area and **skip cache maintenance automatically**.
+Transfer calls stay the same. Set the peripheral constructor's final argument to `System::CachePolicy::NonCacheable` to **skip all cache maintenance** for that object. It applies to TX/RX together (all channels for TIM). The default `Cacheable` accepts any valid DMA buffer and performs normal maintenance without detecting its region. With `NonCacheable`, every DMA buffer used by that object must be in DTCM or non-cacheable MPU memory; this is the application's responsibility. The setting does not place buffers or configure MPU.
+
+F7 SPI construction for the full-duplex example below:
+
+```cpp
+using S = SPI::_1;
+constinit SPI spi(S::instance, SPI::Direction::TXRX,
+    S::SCK::PA5, S::MOSI::PA7, S::MISO::PA6, {},
+    S::DMA::TX_DMA2_Stream3, S::DMA::RX_DMA2_Stream0,
+    System::CachePolicy::NonCacheable);
+```
+
+Use the same final policy argument for the UART, ADC and TIM objects below; USART F7/G0 takes it after `ClockSource`, ADC after the trigger source, TIM after the optional counter pointer. See the module documentation for complete constructors.
 
 **UART packet reception:**
 
@@ -206,9 +218,9 @@ while (spi.Process() == SysStatus::Busy) {}
 
 **TIM PWM DMA / WS2812B** — same idea: put the CCR buffer in an area and call `SendDMA()` as usual.
 
-**Direct `DMA_Sx` use** — no `System::Cache*()` calls are needed for buffers in an area (calling them is harmless: they return immediately).
+**Direct `DMA_Sx` use** — omit `System::Cache*()` calls for buffers in a non-cacheable area. The helpers no longer detect regions or return early based on a buffer's address.
 
-> The check is "the **whole** range lies inside **one** area". A buffer that starts in an area and runs past its end is treated as cacheable — keep buffers within `size`.
+> There is **no run-time region check**. With `NonCacheable`, keep every complete buffer within non-cacheable memory; passing any cacheable bytes can produce stale or corrupted data.
 
 ---
 
@@ -449,7 +461,19 @@ __attribute__((section(".dma.uart_rx"))) static Frame rx_frames[4];
 
 ## 6. Использование с драйверами
 
-API драйверов не меняется. Передавайте буфер как обычно; драйвер видит, что диапазон лежит внутри настроенной области, и **автоматически пропускает обслуживание кеша**.
+Вызовы передачи не меняются. Чтобы **пропустить все операции обслуживания кеша** для объекта, задайте последним аргументом конструктора периферии `System::CachePolicy::NonCacheable`. Политика общая для TX/RX (всех каналов TIM). По умолчанию `Cacheable` допускает любой корректный DMA-буфер и выполняет обычное обслуживание без определения области памяти. При `NonCacheable` все DMA-буферы объекта должны лежать в DTCM или некешируемой памяти MPU; это ответственность приложения. Параметр не размещает буферы и не настраивает MPU.
+
+Конструктор SPI на F7 для полнодуплексного примера ниже:
+
+```cpp
+using S = SPI::_1;
+constinit SPI spi(S::instance, SPI::Direction::TXRX,
+    S::SCK::PA5, S::MOSI::PA7, S::MISO::PA6, {},
+    S::DMA::TX_DMA2_Stream3, S::DMA::RX_DMA2_Stream0,
+    System::CachePolicy::NonCacheable);
+```
+
+Для объектов UART, ADC и TIM ниже также задайте эту политику последним аргументом: у USART F7/G0 — после `ClockSource`, у ADC — после источника триггера, у TIM — после необязательного указателя второго таймера. Полные конструкторы приведены в документации модулей.
 
 **Приём пакетов UART:**
 
@@ -491,9 +515,9 @@ while (spi.Process() == SysStatus::Busy) {}
 
 **PWM через DMA / WS2812B (TIM)** — то же самое: поместите буфер CCR в область и вызывайте `SendDMA()` как обычно.
 
-**Прямая работа с `DMA_Sx`** — для буферов в области вызовы `System::Cache*()` не нужны (вызывать их безвредно: они сразу возвращаются).
+**Прямая работа с `DMA_Sx`** — для буферов в некешируемой области не вызывайте `System::Cache*()`. Функции больше не определяют область и не возвращаются сразу по адресу буфера.
 
-> Проверка звучит так: «**весь** диапазон лежит внутри **одной** области». Буфер, начинающийся в области и выходящий за её конец, считается кешируемым — не выходите за `size`.
+> **Проверки области во время выполнения нет.** При `NonCacheable` весь буфер должен находиться в некешируемой памяти; попадание любых его байтов в кешируемую память может привести к устаревшим или повреждённым данным.
 
 ---
 

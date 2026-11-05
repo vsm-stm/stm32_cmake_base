@@ -29,6 +29,11 @@
 	// Empty/null/absent reserves no memory. Buffers use section(".dma.adc").
 	"dma_regions":  [],
 
+	// Optional preprocessor definitions, without -D; shared by all build targets.
+	// Example: ["USE_DISPLAY", "UART_USE_ATOMIC=1", "BOARD_REV=2"]
+	// Empty/null/absent adds no definitions.
+	"defines":      [],
+
 	// your code and include paths
 	"sources":      ["src/main.cpp"],
 	"include_dirs": ["inc"],

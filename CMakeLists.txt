@@ -54,6 +54,7 @@ target_compile_definitions(stm32_platform INTERFACE
 	${STM32_CORE}        # STM32F4
 	"STM32_DEVICE_HEADER=\"${STM32_SERIES_LC}.h\""   # for #include STM32_DEVICE_HEADER in code without drivers
 	STM32_STARTUP_ENABLES_FPU   # startup_common.c grants FPU access before constructors
+	${CFG_defines}      # project.json: shared by application, drivers and bootloader
 	$<$<CONFIG:Debug>:DEBUG>
 )
 

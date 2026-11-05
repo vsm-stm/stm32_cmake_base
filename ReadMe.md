@@ -24,7 +24,7 @@ This is specifically a starting base for an application, not the application its
 At the top level:
 
 - `project.json` — the **single configuration file**: name, version, chip, heap/stack,
-  driver list, sources, include paths, bootloader (`bootloader`). Data only, no code.
+  driver list, preprocessor definitions, sources, include paths, bootloader (`bootloader`). Data only, no code.
 - `CMakeLists.txt` — the glue: config → toolchain → `project()` → downloads →
   the `stm32_platform` target (flags that do not depend on the configuration) →
   drivers → `stm32_add_firmware()`. Rarely edited.
@@ -271,6 +271,7 @@ after a value are not supported. Here is an example without comments:
   "drivers":      null,
   "drivers_tag":  null,
   "dma_regions":  [],
+  "defines":      [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -298,6 +299,11 @@ after a value are not supported. Here is an example without comments:
   Drivers are always downloaded into the project's `Drivers/` directory;
   their version is selected only through `project.json`. A source override
   through `FETCHCONTENT_SOURCE_DIR_DRIVERS` is ignored.
+- `defines` — optional array of preprocessor definitions without `-D`, e.g.
+  `["USE_DISPLAY", "UART_USE_ATOMIC=1", "BOARD_REV=2"]`. The top-level project's
+  definitions apply to the application, drivers and bootloader through the shared
+  `stm32_platform` target. Missing/null/empty adds nothing. Each entry must be
+  a nonempty string without semicolons.
 - `sources` / `include_dirs` — your code and include paths.
 - `bootloader` — `null` / key absent: no bootloader, firmware starts at the
   beginning of flash (no sectors). `{"app_start_sector": N, "repo": "...",
@@ -378,7 +384,25 @@ for MPU/cache details. Buffers outside these areas also work: the drivers
 
 Flags: ones that do not depend on the configuration live in the
 `stm32_platform` target in `CMakeLists.txt`; optimization and debug info live
-in `CMakePresets.json`. There are no flags in `project.json`.
+in `CMakePresets.json`. User preprocessor definitions belong in `project.json`
+under `defines`; arbitrary compiler flags are not supported there.
+
+For example, with `"defines": ["USE_DISPLAY", "UART_USE_ATOMIC=1", "BOARD_REV=2"]`:
+
+```cpp
+#ifdef USE_DISPLAY
+    // Display support.
+#endif
+#if UART_USE_ATOMIC
+    // Atomic UART register updates.
+#endif
+#if BOARD_REV == 2
+    // Board revision 2.
+#endif
+```
+
+Use `#if` for numeric values: `#ifdef` checks presence, so it is also true for
+`UART_USE_ATOMIC=0`. Changing `project.json` triggers CMake reconfiguration.
 
 ### 2. Configure and build
 
@@ -593,7 +617,7 @@ the startup/linker/SVD, and the debug configuration to the same microcontroller.
 
 На верхнем уровне находятся:
 
-- `project.json` — **единственный файл конфигурации**: имя, версия, чип, heap/stack, список драйверов, исходники, include-пути, загрузчик (`bootloader`). Только данные, без кода.
+- `project.json` — **единственный файл конфигурации**: имя, версия, чип, heap/stack, список драйверов, определения препроцессора, исходники, include-пути, загрузчик (`bootloader`). Только данные, без кода.
 - `CMakeLists.txt` — склейка: конфиг → тулчейн → `project()` → скачивание → таргет `stm32_platform` (флаги, не зависящие от конфигурации) → драйверы → `stm32_add_firmware()`. Правится редко.
 - `CMakePresets.json` — пресеты `debug`, `debug-o0`, `release`, `relWithDebInfo`, `minSizeRel`. Здесь же **единственное место флагов оптимизации и отладки** (`-Og/-O0/-Os`, `-g*`, `NDEBUG`) — через `CMAKE_<C|CXX>_FLAGS_<CONFIG>`.
 - `cmake/functions.cmake` — все функции платформы (чтение конфига, `stm32_add_firmware`, загрузка файлов), только определения.
@@ -810,6 +834,7 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   "drivers":      null,
   "drivers_tag":  null,
   "dma_regions":  [],
+  "defines":      [],
   "sources":      ["src/main.cpp"],
   "include_dirs": ["inc"],
   "bootloader":   null
@@ -833,6 +858,11 @@ ENOSYS; ошибка вывода даёт EIO/short write; отрицатель
   Драйверы всегда скачиваются в папку `Drivers/` проекта; версия выбирается
   только через `project.json`. Подмена исходников через
   `FETCHCONTENT_SOURCE_DIR_DRIVERS` игнорируется.
+- `defines` — необязательный массив определений препроцессора без `-D`, например
+  `["USE_DISPLAY", "UART_USE_ATOMIC=1", "BOARD_REV=2"]`. Определения корневого проекта
+  передаются приложению, драйверам и загрузчику через общий `stm32_platform`.
+  Отсутствие ключа, `null` или пустой массив ничего не добавляют. Каждый элемент —
+  непустая строка без точки с запятой.
 - `sources` / `include_dirs` — ваш код и include-пути.
 - `bootloader` — `null` / ключа нет: без загрузчика, прошивка с начала флеша (никаких секторов). `{"app_start_sector": N, "repo": "...", "tag": "...", "extra_sources": [...]}` (`repo`/`tag`/`extra_sources` необязательны; `repo`/`tag` по умолчанию `vsm-stm/stm32-bootloader`, `main`): загрузчик в начале флеша (секторы `[0, N)`), прошивка — с сектора `N`. Платформа клонирует репозиторий в `Bootloader/` (как `Drivers/`) и собирает его **вторым образом** этим же проектом: берёт списки `sources` / `include_dirs` из его `project.json`; его `CMakeLists.txt` не используется. `stm32-bootloader` — маленькая библиотека (проверка образа, прыжок, флаг обновления), с собственным `main()` — `extra_sources` добавляет реализацию `bl_stay(bl_stay_reason_t)` и её transport/hardware код: файлы ЭТОГО проекта (пути от его `project.json`), которые добавляются к сборке образа загрузчика. `include_dirs` обоих проектов теперь общие в обе стороны: загрузчик видит `include_dirs` этого проекта, а этот проект — `include_dirs` загрузчика (обычно `Bootloader/src`, там — общие для обеих сторон заголовки вроде флага «нужно обновление»; ничего не копипастится). Каждый образ получает `STM32_IMAGE_FLASH_ORIGIN/END`. Образ, не влезший в свои сектора, — ошибка линковки (`region FLASH overflowed`). Прошивка с сектора `N > 0` сама не запустится: при сбросе ядро берёт вектор с `0x08000000` — его должен запускать загрузчик.
 
@@ -892,7 +922,23 @@ stack/heap/data остаются за пределами этих областе
 работают: драйверы (UART, SPI, I2C, ADC, TIM) сами обслуживают кеш для обычных
 кешируемых буферов.
 
-Флаги: не зависящие от конфигурации — в таргете `stm32_platform` в `CMakeLists.txt`; оптимизация и отладка — в `CMakePresets.json`. В `project.json` флагов нет.
+Флаги: не зависящие от конфигурации — в таргете `stm32_platform` в `CMakeLists.txt`; оптимизация и отладка — в `CMakePresets.json`. Пользовательские определения препроцессора задаются в `project.json` через `defines`; произвольные флаги компилятора там не поддерживаются.
+
+Например, при `"defines": ["USE_DISPLAY", "UART_USE_ATOMIC=1", "BOARD_REV=2"]`:
+
+```cpp
+#ifdef USE_DISPLAY
+    // Поддержка дисплея.
+#endif
+#if UART_USE_ATOMIC
+    // Атомарные изменения регистров UART.
+#endif
+#if BOARD_REV == 2
+    // Вторая ревизия платы.
+#endif
+```
+
+Для численных значений используйте `#if`: `#ifdef` проверяет наличие определения и срабатывает также при `UART_USE_ATOMIC=0`. Изменение `project.json` вызывает переконфигурацию CMake.
 
 ### 2. Сконфигурируйте и соберите
 
