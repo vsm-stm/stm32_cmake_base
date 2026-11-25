@@ -48,8 +48,25 @@
       "detail": "Configure project using active CMake configure preset"
     },
 
+    {
+      "label": "STM32: Update base",
+      "type": "process",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "windows": {
+        "command": "powershell.exe",
+        "args": ["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File", "${workspaceFolder}/cmake/update-base.ps1", "${input:stm32BaseTag}"]
+      },
+      "linux": {
+        "command": "sh",
+        "args": ["${workspaceFolder}/cmake/update-base.sh", "${input:stm32BaseTag}"]
+      },
+      "problemMatcher": []
+    },
+
     // ======================================================
-    // STM32 Programmer CLI tasks
+    // STM32 Programmer and ST-LINK tasks
     // ======================================================
 
     {
@@ -64,6 +81,20 @@
       },
       "problemMatcher": [],
       "detail": "List available STM32 programmer interfaces"
+    },
+
+    {
+      "type": "process",
+      "label": "STM32Prog: Update ST-LINK",
+      "windows": {
+        "command": "cmd.exe",
+        "args": ["/d", "/c", ".\\STLinkUpgrade.bat"],
+        "options": {
+          "cwd": "${env:STM32CLT_PATH}"
+        }
+      },
+      "problemMatcher": [],
+      "detail": "Update ST-LINK firmware using STM32CubeCLT"
     },
 
     // The application image - the active CMake launch target. With a bootloader,
@@ -165,5 +196,12 @@
       "detail": "Build, flash bootloader.elf, then the application image"
     }
 
+  ],
+  "inputs": [
+    {
+      "id": "stm32BaseTag",
+      "type": "promptString",
+      "description": "Target STM32 base Git tag (e.g. v4.1)"
+    }
   ]
 }

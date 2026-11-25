@@ -39,6 +39,16 @@
       "tooltip": "Build and flash the application"
     },
     {
+      "label": "$(refresh) Reset",
+      "task": "STM32Prog: Reset target",
+      "tooltip": "Hardware reset of the MCU"
+    },
+    {
+      "label": "$(close) Erase",
+      "task": "STM32Prog: Full chip erase",
+      "tooltip": "Full chip erase via SWD"
+    },
+    {
       "label": "$(run-all) Flash all",
       "task": "Build + Flash all (bootloader + app)",
       "tooltip": "With a bootloader: build, flash bootloader.elf and the application"
@@ -54,19 +64,14 @@
       "tooltip": "Flash the active CMake launch target via SWD and start it"
     },
     {
-      "label": "$(refresh) Reset",
-      "task": "STM32Prog: Reset target",
-      "tooltip": "Hardware reset of the MCU"
-    },
-    {
-      "label": "$(close) Erase",
-      "task": "STM32Prog: Full chip erase",
-      "tooltip": "Full chip erase via SWD"
-    },
-    {
       "label": "$(list) Probes",
       "task": "STM32Prog: List interfaces",
       "tooltip": "List connected programmers"
+    },
+    {
+      "label": "$(arrow-up) Update ST-LINK",
+      "task": "STM32Prog: Update ST-LINK",
+      "tooltip": "Update ST-LINK firmware using STM32CubeCLT"
     }
   ],
 
